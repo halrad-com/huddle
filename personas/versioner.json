@@ -1,0 +1,4 @@
+{
+  "tools": ["Read", "Edit", "Glob", "Grep", "Bash"],
+  "allowedTools": ["Bash(git *)"]
+}

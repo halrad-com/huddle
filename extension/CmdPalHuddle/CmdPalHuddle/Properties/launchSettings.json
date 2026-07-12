@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "CmdPalHuddle (Package)": {
+      "commandName": "MsixPackage",
+      "doNotLaunchApp": true
+    },
+    "CmdPalHuddle (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

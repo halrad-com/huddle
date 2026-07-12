@@ -1,0 +1,37 @@
+bin/
+obj/
+publish/
+publish-staging/
+publish-test*/
+
+# Per-machine scratch
+huddle.json.bak
+__replace_conflicts.py
+logs/
+*.user
+*.suo
+.vs/
+.worktrees/
+
+# IPC runtime state — ephemeral message traffic, not source
+ipc/*/inbox/
+ipc/*/outbox/
+ipc/*/processed/
+ipc/*/failed/
+ipc/processed/
+ipc/_huddle/
+ipc/workledger/claims/
+ipc/workledger/*.md
+
+# Claude Code runtime state
+.claude/scheduled_tasks.lock
+
+# Per-machine Claude Code settings — each operator keeps their own.
+# The committed default lives in .claude/settings.json; settings.local.json is yours.
+.claude/settings.local.json
+
+# Brainstorming companion sessions
+.superpowers/
+
+# Per-machine config — each machine maintains its own; copy from template.json
+huddle.json

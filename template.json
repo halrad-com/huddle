@@ -1,0 +1,64 @@
+{
+  "sessions": [
+    {
+      "name": "myapp",
+      "aliases": ["app", "web"],
+      "root": "C:\\Users\\<username>\\source\\repos\\myapp",
+      "purpose": "MyApp active development - REST API, web UI",
+      "autoStart": false,
+      "paths": {
+        "testLogs": "<path-to-myapp-test-logs>",
+        "deploy": "C:\\Users\\<username>\\source\\repos\\myapp\\deploy",
+        "apiDocs": "src/docs/api.md"
+      },
+      "notes": "Free-form context injected into every session prompt for this repo — conventions, gotchas, where the living docs live.",
+      "replayHost": "127.0.0.1",
+      "replayPort": 8080
+    },
+    {
+      "name": "example-cli-repo",
+      "root": "C:\\Users\\<username>\\source\\repos\\example",
+      "purpose": "Example: CLI repo replay via a runner command instead of mbxhval host/port. The literal {output} token is replaced with a temp path; the command must write {\"summary\":{\"total\":N,\"passed\":N,\"failed\":N,\"skipped\":N}} there. Exit 0 green, 1 failures, 2 config error.",
+      "autoStart": false,
+      "replayCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Users\\<username>\\source\\repos\\example\\tests\\replay\\run-captures.ps1 -OutputSummary {output}"
+    },
+    {
+      "name": "webshop",
+      "aliases": ["shop"],
+      "root": "C:\\Users\\<username>\\source\\repos\\webshop",
+      "purpose": "Webshop backend",
+      "autoStart": false
+    },
+    {
+      "name": "docs-site",
+      "aliases": ["docs"],
+      "root": "C:\\Users\\<username>\\source\\repos\\docs-site",
+      "purpose": "Documentation site deployment and content management",
+      "autoStart": false
+    },
+    {
+      "name": "labs",
+      "root": "C:\\Users\\<username>\\source\\repos\\labs",
+      "purpose": "Advanced-research experiments - researcher persona scouting and PoC spikes",
+      "autoStart": false
+    },
+    {
+      "name": "huddle",
+      "aliases": ["hd"],
+      "root": "C:\\Users\\<username>\\source\\repos\\claude-huddle",
+      "purpose": "Claude Huddle development",
+      "autoStart": false
+    },
+    {
+      "name": "workspace",
+      "root": "C:\\Users\\<username>\\source\\repos",
+      "purpose": "Multi-repo workspace, cross-project tasks",
+      "autoStart": false
+    }
+  ],
+  "claudePath": null,
+  "contextFile": true,
+  "crashLogRetention": 10,
+  "rescanIntervalSeconds": 30,
+  "reclaimResourcesOnStop": false
+}

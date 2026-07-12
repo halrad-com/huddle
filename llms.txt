@@ -1,0 +1,76 @@
+# Claude-Huddle
+
+> A single-operator console for running a fleet of Claude Code sessions on Windows. Each session is a real `claude.exe` in its own console window, tuned to a role by a swappable persona prompt (+ optional JSON tuning sidecar for model/effort/tool-fence/MCP/plugins). Sessions coordinate through a file-based IPC layer: messaging, file-claim locking, and plain-English task dispatch. Windows-native, offline, no cloud/CDN/external API at runtime, no third-party NuGet dependencies beyond the .NET BCL.
+
+Huddle is itself an agent-facing tool: agents both run *inside* sessions and send orchestration commands to it. This file is the concise map; the linked docs are authoritative.
+
+## Run
+
+- Build: `build.cmd` (needs .NET 8 SDK) → single-file exe at `publish/huddle.exe`
+- From source: `dotnet run --project src/huddle.csproj`
+- Config: reads `huddle.json` from the current dir, or `--config <path>`. Personas, `logs/`, `context.md`, and `ipc/` are all relative to the config location.
+
+## Console verbs
+
+The operator types these at the huddle `>` prompt. Run `help` for the live list.
+
+- `start <repo> [persona] [prompt]` — launch a session (aliases work)
+- `stop <instance|repo>` · `restart <instance>` — lifecycle
+- `repos` · `personas` · `status` — inventory and live state
+- `send <instance> <msg>` · `messages <instance>` · `say <instance> <text>` — messaging / direct prompt injection
+- `broadcast [@repo[,repo]] <subject> <msg>` — fan out to every live session, or only the named repos' agents (aliases work; unknown repo nacks)
+- `delegate "desc" to <instance>` — assign a tracked task (auto-starts target)
+- `direct <english task>` — hand a task to `huddle:architect`, which plans and fires sub-sessions
+- `huddle <group>` — launch a named group from `huddle.json`
+- `tasks` · `progress` · `conflicts` · `queue` — tracking, checkpoints, file-claim overlaps, dispatch-batch work queue (active/queued/done/failed)
+- `janitor` — report leaked session resources (uncleaned resource-ledger entries with live pids)
+- `docs [plans|churn]` — leveled document log (Docs deliverables / +Plans / +Churn git changes); `open <n>` opens an entry
+- `replay <repo>` — run the repo's captured regression tests via the configured runner (mbxhval host/port, or any CLI via per-repo `replayCommand`); runner: github.com/halrad-com/MBXHVAL
+- `shell [<repo>] <data>` — hand data to the OS file handler
+- `scan` · `ver` · `reload` · `quit` · `shutdown`
+
+## Orchestration commands (agent → `_huddle`)
+
+Agents write JSON to `ipc/_huddle/inbox/`. The orchestrator replies `ack:<cmd>` (accepted) or `nack:<cmd>` (rejected — body has the reason).
+
+- `start-session` · `stop-session` · `delegate-task`
+- `task-complete` / `task-failed` / `task-progress`
+- `broadcast` — fan out to live sessions; optional `"repo":"name-or-alias[,more]"` scopes delivery to those repos' agents (filter order: targets → repo → exclude)
+- `dispatch-batch` — multi-session dispatch with declared per-task file scope + optional `dependsOn`; feeds a work queue that **serializes** (not rejects) conflicting/blocked units — a unit dispatches when its files are free and its prerequisites are done. Caller errors still nack: self-overlap within a batch, same `repo:persona` twice, unknown repo/persona/dep, duplicate unit id, dependency cycle. Queue persists under `ipc/workledger/queue/`.
+- `release` — hand back claimed files after committing (a fully-released unit advances the queue)
+
+## Inter-session communication
+
+- Each session has `ipc/<safe-name>/inbox/` (safe-name = `repo:persona` with `:`→`_`).
+- Messages are JSON: `{from,to,timestamp,type,subject,body}`. Read the file the wake-line names; reply by writing JSON to the sender's inbox; move handled mail to `processed/`.
+- Work Ledger (`ipc/workledger/`) + orchestrator claims (`ipc/workledger/claims/`) prevent two sessions editing the same files; `conflicts` shows both.
+- Resource Ledger (`ipc/resledger/<safe-name>.json`) — sessions register every spawned OS resource (process, port, temp profile) with its literal cleanup command, tear down in a finally, and mark `cleanedAt`. Huddle reports leaks on session stop and via `janitor`; `scripts/sweep-orphans.ps1 [-Kill]` catches unregistered strays. Opt-in auto-reclaim: `reclaimResourcesOnStop` in `huddle.json` (default false). Spec: `docs/resource-ledger-spec.md`.
+
+## Personas
+
+Markdown role files in `personas/`, appended to Claude's system prompt; optional `<name>.json` tunes model/effort/tools/MCP/plugins, with `_shared.json` defaults and `_shared.md` shared prose rules. Shipped: `architect` (Opus, no Edit/Write) · `reviewer` (no Edit/Write) · `frontenddev` · `backenddev` · `documenter` (bare) · `versioner` (bare) · `researcher`.
+
+## Document log convention
+
+Sessions populate `docs` by *declaring* artifacts in a `## Documents` section of their scratchpad (`logs/<session>/scratchpad.md`), one bullet each:
+`- [Title](path) — note #output|#plans` (`#output`=deliverable, `#plans`=plan; omitted → inferred from path). Parsed directly from scratchpads, so gitignored artifacts still appear. See `personas/_shared.md`.
+
+## Conventions
+
+- Offline-first: no runtime cloud/CDN/external API. Minimize dependencies — BCL only.
+- Work on `master` by default; create feature branches only when the operator explicitly authorizes one.
+- Tests: `dotnet test tests/huddle.Tests` (xunit) — keep it green; also verify by build + manual checks + logging.
+- Commits are the release signal; commit before releasing claimed files.
+
+## Docs
+
+- [README.md](README.md): overview, quick start, full command reference, document log, capture replay, config
+- [DESIGN.md](DESIGN.md): deep reference — architecture, the Bun crash problem, IPC, persona tuning, document-log internals
+- [CLAUDE.md](CLAUDE.md): project instructions for agents working in this repo
+- [setup/setup.md](setup/setup.md): guided bootstrap setup (`/setup`)
+- [setup/setup-cmdpal.md](setup/setup-cmdpal.md): optional CmdPal extension setup (`/setup-cmdpal`)
+- [docs/persona-tuning.md](docs/persona-tuning.md): persona JSON sidecar schema
+- [docs/work-ledger-spec.md](docs/work-ledger-spec.md): file-claim coordination
+- [docs/resource-ledger-spec.md](docs/resource-ledger-spec.md): spawned-resource registration + guaranteed cleanup
+- [docs/multi-huddle-howto.md](docs/multi-huddle-howto.md): running multiple huddles
+- [ROADMAP.md](ROADMAP.md): vision and progression
