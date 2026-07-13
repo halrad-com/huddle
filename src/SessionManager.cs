@@ -361,7 +361,7 @@ public class SessionManager
             if (!continueSession)
                 claudeArgs += $" --session-id {instance.SessionId!.Value}";
             if (!continueSession)
-                _log($"[{instance.InstanceId}] Pre-assigned session-id: {instance.SessionId!.Value}");
+                _log($"[{instance.InstanceId}] Resume with: {instance.ResumeCommand}  (run in {instance.Root})");
             if (continueSession)
                 claudeArgs += " --continue";
             var promptTempFile = Path.Combine(sessionLogDir, $"{instance.SafePathName}-persona.tmp");
@@ -633,7 +633,7 @@ public class SessionManager
     /// <summary>
     /// Recover a session from persisted state — attach to an existing process by PID.
     /// </summary>
-    public bool Recover(string instanceId, string repoName, string? persona, Process proc, DateTime startedAt)
+    public bool Recover(string instanceId, string repoName, string? persona, Process proc, DateTime startedAt, Guid? sessionId = null)
     {
         repoName = ResolveRepoName(repoName);
         if (!_repos.TryGetValue(repoName, out var def))
@@ -647,7 +647,8 @@ public class SessionManager
             Process = proc,
             Status = SessionStatus.Running,
             StartedAt = startedAt,
-            ActivePersona = persona
+            ActivePersona = persona,
+            SessionId = sessionId
         };
 
         _instances[instanceId] = instance;
@@ -659,6 +660,59 @@ public class SessionManager
 
         SessionStateChanged?.Invoke(instance, SessionStatus.Running);
         return true;
+    }
+
+    /// <summary>
+    /// Open `claude --resume &lt;session-id&gt;` for a tracked session in a fresh console,
+    /// with the working directory set to the session's repo root (Claude keys session
+    /// storage by cwd). This is a convenience launcher — the resumed CLI is NOT adopted
+    /// as a managed instance; it's the operator picking a prior conversation back up.
+    /// Returns false if the instance is unknown or carries no session id.
+    /// </summary>
+    public bool Resume(string id)
+    {
+        var instance = _instances.TryGetValue(id, out var direct) ? direct : ResolveInstance(id);
+        if (instance == null)
+        {
+            _log($"resume: unknown instance '{id}'.");
+            return false;
+        }
+        if (!instance.SessionId.HasValue)
+        {
+            _log($"resume: {instance.InstanceId} has no session id (started before session-id assignment, or a --continue session).");
+            return false;
+        }
+        // Refuse to resume a session that's still alive: a second `claude` on the same
+        // session-id + cwd means two live writers on one transcript JSONL, which forks
+        // and can corrupt the conversation. Resume is for stopped/crashed sessions.
+        if (instance.IsAlive)
+        {
+            _log($"resume: {instance.InstanceId} is still running — 'focus {instance.InstanceId}' to jump to it, or stop it first.");
+            return false;
+        }
+
+        // Mirror the launch shape of Start: cmd.exe wrapper, identifiable title,
+        // Bun crash reporter silenced, own console via UseShellExecute.
+        var envPrefix = $"title huddle-resume: {instance.InstanceId} && set BUN_CRASH_REPORTER_URL= && ";
+        var psi = new ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            Arguments = $"/c {envPrefix}\"{_claudePath}\" --resume {instance.SessionId.Value}",
+            WorkingDirectory = instance.Root,
+            UseShellExecute = true,
+        };
+
+        try
+        {
+            Process.Start(psi);
+            _log($"resume: launched {instance.ResumeCommand}  (in {instance.Root})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log($"resume: failed to launch — {ex.Message}");
+            return false;
+        }
     }
 
     public void StopAll()

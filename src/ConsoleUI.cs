@@ -174,6 +174,7 @@ public class ConsoleUI
             Console.WriteLine("  tasks                    Show tracked tasks");
             Console.WriteLine("  scan                     Re-scan inbox for missed commands");
             Console.WriteLine("  focus <instance|repo>    Bring a session's console window to the foreground (alias: goto)");
+            Console.WriteLine("  resume <instance>        Open 'claude --resume <session-id>' for a session in its repo root");
             Console.WriteLine("  progress                 Show last checkpoint per session");
             Console.WriteLine("  conflicts                Report file claim overlaps across sessions");
             Console.WriteLine("  janitor                  Report leaked session resources (resledger, B016)");
@@ -319,6 +320,13 @@ public class ConsoleUI
                     Log("Usage: restart <instance>");
                 else
                     _manager.Restart(arg);
+                break;
+
+            case "resume":
+                if (string.IsNullOrEmpty(arg))
+                    Log("Usage: resume <instance|repo:persona>");
+                else
+                    _manager.Resume(arg);
                 break;
 
             case "personas" or "p":

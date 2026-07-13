@@ -64,4 +64,15 @@ public class SessionInstance
     /// Sanitize instance ID for use in file paths (colons are invalid on Windows).
     /// </summary>
     public string SafePathName => InstanceId.Replace(':', '_');
+
+    /// <summary>
+    /// The command that resumes this session's Claude conversation, or null if no
+    /// session id was assigned (e.g. a --continue session). This is the single
+    /// source of truth for the resume string — console log, context.md ledger, and
+    /// the `resume` verb all consume it. Run it from <see cref="Root"/>: Claude keys
+    /// session storage by working directory.
+    /// </summary>
+    public string? ResumeCommand => SessionId.HasValue
+        ? $"claude --resume {SessionId.Value}"
+        : null;
 }

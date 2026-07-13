@@ -20,6 +20,11 @@ public class SessionStateEntry
 
     [JsonPropertyName("startedAt")]
     public DateTime StartedAt { get; set; }
+
+    // Stored as a string (not raw Guid) so state.json is self-documenting: the
+    // value pastes straight into `claude --resume <sessionId>`.
+    [JsonPropertyName("sessionId")]
+    public string? SessionId { get; set; }
 }
 
 public static class SessionState
@@ -39,7 +44,8 @@ public static class SessionState
                 RepoName = i.RepoName,
                 Persona = i.ActivePersona,
                 Pid = i.Process!.Id,
-                StartedAt = i.StartedAt ?? DateTime.Now
+                StartedAt = i.StartedAt ?? DateTime.Now,
+                SessionId = i.SessionId?.ToString()
             })
             .ToList();
 
@@ -91,8 +97,10 @@ public static class SessionState
                 continue;
             }
 
-            // Reconnect
-            if (!manager.Recover(entry.InstanceId, entry.RepoName, entry.Persona, proc, entry.StartedAt))
+            // Reconnect. Carry the session id back so the recovered session keeps
+            // its Resume line in context.md and can be reopened via the `resume` verb.
+            Guid? sessionId = Guid.TryParse(entry.SessionId, out var sid) ? sid : null;
+            if (!manager.Recover(entry.InstanceId, entry.RepoName, entry.Persona, proc, entry.StartedAt, sessionId))
             {
                 proc.Dispose();
                 continue;

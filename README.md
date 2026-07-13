@@ -4,6 +4,8 @@ A single-operator console for running a fleet of Claude Code sessions on Windows
 
 Windows-native. Offline. No cloud, no CDN, no external API at runtime. Each session is a real `claude.exe` in its own console window — if one crashes, the rest keep working.
 
+> **What changed recently?** See [`CHANGELOG.md`](CHANGELOG.md) — date-indexed, newest first. There are no versioned releases: you clone the repo and build, so the real version is your source HEAD + build date (`ver` reports it).
+
 ---
 
 ## What It Is
@@ -249,6 +251,7 @@ Run `help` in huddle for the live version. Current commands:
 | `start <repo> [persona] [prompt]` | Launch a session. Aliases work. Optional persona and opening task prompt. |
 | `stop <instance\|repo>` | Stop one session (by instance ID) or every session of a repo (by name or alias). |
 | `restart <instance>` | Restart a specific session. Keeps the last persona. Uses `--continue` for crash recovery. |
+| `resume <instance>` | Reopen a stopped/crashed session's conversation (`claude --resume <session-id>`) in a fresh console at the repo root. Refuses if the session is still running. |
 | `repos` | List every registered repo with purpose and aliases. |
 | `personas` | List every available persona. |
 | `status` | Show every active session with status, uptime, and working directory. Color-coded. |

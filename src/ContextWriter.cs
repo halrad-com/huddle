@@ -58,6 +58,8 @@ public class ContextWriter
                             lines.Add($"- **Started:** {instance.StartedAt:yyyy-MM-dd HH:mm:ss}");
                         if (instance.StoppedAt.HasValue)
                             lines.Add($"- **Stopped:** {instance.StoppedAt:yyyy-MM-dd HH:mm:ss}");
+                        if (instance.ResumeCommand != null)
+                            lines.Add($"- **Resume:** `{instance.ResumeCommand}` (run in {instance.Root})");
 
                         lines.Add("");
                     }
