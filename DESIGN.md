@@ -21,14 +21,14 @@ Three things in one:
 ### Running from source
 
 ```
-cd C:\path\to\claude-huddle
+cd C:\path\to\huddle
 dotnet run --project src/huddle.csproj
 ```
 
 ### Running the published exe
 
 ```
-cd C:\path\to\claude-huddle
+cd C:\path\to\huddle
 huddle.exe
 ```
 

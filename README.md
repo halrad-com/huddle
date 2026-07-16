@@ -73,8 +73,8 @@ What you won't get from a terminal full of `claude` tabs:
 **Guided setup (recommended):**
 
 ```
-git clone https://github.com/halrad-com/claude-huddle.git
-cd claude-huddle
+git clone https://github.com/halrad-com/huddle.git
+cd huddle
 claude          # then type: /setup
 ```
 

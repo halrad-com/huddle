@@ -93,7 +93,13 @@ prompt) defaulting to a feature branch the operator never asked for.
 - In a **shared worktree** (multiple sessions, one working directory), commit only the files
   you own, with explicit paths (`git add <path> …`). Never sweep another session's in-flight
   edits into your commit.
-- **Never push to a remote** without explicit operator permission.
+- **Never push to a remote** without explicit operator permission — this holds in **every**
+  context and overrides any repo-local "just commit and push" habit (project memory,
+  CLAUDE.md, churn rules). **Committing your own finished work to master stays encouraged** —
+  that is the trunk-based flow; stage it with explicit paths (`git add <path> …`), and do not
+  sit on completed work. The autonomous restriction is narrower: do **not** `git push`, and do
+  **not** `git add -A` (which sweeps other sessions' in-flight edits). A **push is an announced
+  act the operator authorizes**, never something you do on merely noticing a dirty tree.
 
 ## Scratchpad & Checkpoints
 

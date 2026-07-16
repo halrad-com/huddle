@@ -127,6 +127,11 @@ class Program
         Directory.CreateDirectory(dataDir);
         var personasDir = Path.Combine(configDir, "personas");
 
+        // Open the durable orchestrator log. From here on, every ConsoleUI.Log line
+        // (commands, session lifecycle, shutdown decisions) is also appended to
+        // logs\huddle.log so an abnormal teardown is reconstructable afterward.
+        ConsoleUI.SetLogFile(Path.Combine(dataDir, "huddle.log"));
+
         // Create components
         var contextWriter = config.ContextFile ? new ContextWriter(dataDir, ConsoleUI.Log) : null;
         var contextPath = contextWriter?.ContextPath;
@@ -233,28 +238,76 @@ class Program
         ui.PrintPersonas(manager.GetAvailablePersonas());
         ui.PrintHelp();
 
-        // Handle Ctrl+C — stop all sessions and exit cleanly
-        var shutdownRequested = false;
+        // Handle Ctrl+C — request shutdown, but confirm before killing live sessions.
+        var ctrlCPressed = false;
         Console.CancelKeyPress += (_, e) =>
         {
             e.Cancel = true;
-            shutdownRequested = true;
+            ctrlCPressed = true;
         };
+
+        // Gate every teardown path. Returns true if it is OK to proceed to StopAll().
+        // No running sessions → nothing to protect, proceed silently. A null
+        // (unreadable) answer means stdin is gone and huddle can no longer be
+        // operated, so we proceed rather than spin forever.
+        bool ConfirmShutdown()
+        {
+            var running = manager.Instances.Count(i => i.Value.IsAlive);
+            if (running == 0) return true;
+            Console.Write($"{running} huddle session(s) are running. Terminate them in progress? (y/N): ");
+            var answer = Console.ReadLine();
+            if (answer == null) return true;
+            answer = answer.Trim();
+            return answer.Equals("y", StringComparison.OrdinalIgnoreCase)
+                || answer.Equals("yes", StringComparison.OrdinalIgnoreCase);
+        }
 
         // Command loop
         var stopAll = false;
-        while (!shutdownRequested)
+        while (true)
         {
             ui.PrintPrompt();
 
             var line = Console.ReadLine();
-            if (line == null || shutdownRequested) { stopAll = true; break; }
+
+            // Ctrl+C or EOF: both tear down every session. Record which trigger fired,
+            // confirm, then log the decision — so an abnormal teardown is never a mystery.
+            if (ctrlCPressed || line == null)
+            {
+                var trigger = ctrlCPressed ? "Ctrl+C" : "EOF/stdin-closed";
+                ctrlCPressed = false;
+                ConsoleUI.Log($"Shutdown requested via {trigger}.");
+                if (ConfirmShutdown())
+                {
+                    ConsoleUI.Log($"SHUTDOWN CONFIRMED via {trigger} — stopping all sessions.");
+                    stopAll = true;
+                    break;
+                }
+                ConsoleUI.Log($"Shutdown via {trigger} CANCELLED by operator. Sessions still running.");
+                continue;
+            }
+
+            ConsoleUI.LogInput(line);   // durable record of the exact command entered
 
             manager.Poll(); // Check for any unreported exits
 
             var result = ui.HandleCommand(line);
-            if (result == CommandResult.Shutdown) { stopAll = true; break; }
-            if (result == CommandResult.Quit) break;
+            if (result == CommandResult.Shutdown)
+            {
+                if (ConfirmShutdown())
+                {
+                    ConsoleUI.Log("SHUTDOWN CONFIRMED via 'shutdown' command — stopping all sessions.");
+                    stopAll = true;
+                    break;
+                }
+                ConsoleUI.Log("Shutdown via 'shutdown' command CANCELLED by operator. Sessions still running.");
+                continue;
+            }
+            if (result == CommandResult.Quit)
+            {
+                ConsoleUI.Log("Exit via 'quit' — sessions left running.");
+                break;
+            }
         }
 
         // Exit

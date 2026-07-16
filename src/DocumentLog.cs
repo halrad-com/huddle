@@ -128,7 +128,7 @@ public sealed class ScratchpadDocumentSource : IDocumentSource
                 if (level > maxLevel) continue;          // e.g. maxLevel==Output drops Plans
                 if (level == DocLevel.Churn) continue;    // scratchpad source never yields Churn
 
-                var resolved = ResolvePath(rawPath, repoRoot);
+                var resolved = ResolvePath(rawPath, repoRoot, Path.GetDirectoryName(scratchpad));
                 DateTime? ts;
                 try { ts = File.Exists(resolved) ? File.GetLastWriteTime(resolved) : scratchMtime; }
                 catch { ts = scratchMtime; }
@@ -193,11 +193,29 @@ public sealed class ScratchpadDocumentSource : IDocumentSource
         _ => DocLevel.Output,   // "output" / "docs" / "p0" / anything else
     };
 
-    private static string ResolvePath(string rawPath, string? repoRoot)
+    // Resolve a declared doc path to an absolute path. Absolute paths pass through. A relative
+    // path is resolved against the SCRATCHPAD'S directory first — a markdown link is
+    // conventionally relative to the file that contains it, and agents write links that way —
+    // then against the repo root (huddle's documented convention); whichever actually resolves
+    // to a file on disk wins. If neither exists, fall back to the repo-root resolution so the
+    // entry still shows a best-effort path (previous behavior).
+    private static string ResolvePath(string rawPath, string? repoRoot, string? scratchpadDir)
     {
         if (Path.IsPathRooted(rawPath)) return rawPath;
-        if (repoRoot != null) return Path.GetFullPath(Path.Combine(repoRoot, rawPath));
-        return rawPath;
+
+        var scratchResolved = TryCombine(scratchpadDir, rawPath);
+        var repoResolved = TryCombine(repoRoot, rawPath);
+
+        if (scratchResolved != null && File.Exists(scratchResolved)) return scratchResolved;
+        if (repoResolved != null && File.Exists(repoResolved)) return repoResolved;
+        return repoResolved ?? scratchResolved ?? rawPath;
+    }
+
+    private static string? TryCombine(string? baseDir, string rawPath)
+    {
+        if (string.IsNullOrEmpty(baseDir)) return null;
+        try { return Path.GetFullPath(Path.Combine(baseDir, rawPath)); }
+        catch { return null; }
     }
 
     /// <summary>
@@ -330,15 +348,13 @@ public sealed class FilesystemDocSource : IDocumentSource
         // Home repo: full top-level *.md + docs/** scan.
         if (!string.IsNullOrEmpty(_huddleRoot) && Directory.Exists(_huddleRoot))
         {
+            // Resilient walk: a concurrently written file or a created/removed/reparse-point
+            // subdir skips only that item, never the whole repo (see SafeEnumerateMarkdown).
             var files = new List<string>();
-            try
-            {
-                files.AddRange(Directory.GetFiles(_huddleRoot, "*.md", SearchOption.TopDirectoryOnly));
-                var docsDir = Path.Combine(_huddleRoot, "docs");
-                if (Directory.Exists(docsDir))
-                    files.AddRange(Directory.GetFiles(docsDir, "*.md", SearchOption.AllDirectories));
-            }
-            catch (Exception ex) { _log($"docs: home-repo scan failed — {ex.Message}"); }
+            files.AddRange(SafeEnumerateMarkdown(_huddleRoot, recurse: false));
+            var docsDir = Path.Combine(_huddleRoot, "docs");
+            if (Directory.Exists(docsDir))
+                files.AddRange(SafeEnumerateMarkdown(docsDir, recurse: true));
             foreach (var file in files)
                 AddFile(file, "huddle", maxLevel, results);
         }
@@ -352,15 +368,60 @@ public sealed class FilesystemDocSource : IDocumentSource
             if (string.IsNullOrEmpty(def.Root) || NormDir(def.Root) == huddleFull) continue;  // home repo done above
             var docsDir = Path.Combine(def.Root, "docs");
             if (!Directory.Exists(docsDir)) continue;
-            string[] files;
-            try { files = Directory.GetFiles(docsDir, "*.md", SearchOption.AllDirectories); }
-            catch (Exception ex) { _log($"docs: docs scan failed for {repoName} — {ex.Message}"); continue; }
-            foreach (var file in files)
+            // Resilient walk — a concurrent write / bad subdir under docs/ no longer drops
+            // the whole repo's docs for this run (see SafeEnumerateMarkdown).
+            foreach (var file in SafeEnumerateMarkdown(docsDir, recurse: true))
                 AddFile(file, repoName, maxLevel, results);
         }
 
         _log($"docs: auto-discovered {results.Count} repo doc(s) at <= {maxLevel}");
         return results;
+    }
+
+    // Resilient recursive *.md enumeration. Directory.GetFiles(..., AllDirectories) walks the
+    // whole tree in one call and THROWS if a subdirectory is removed/renamed mid-walk (common
+    // while another session is actively writing docs) or points at a broken reparse target —
+    // and the call sites dropped an ENTIRE repo's docs for that run, so a doc on disk could
+    // vanish from one `docs` invocation and reappear on the next. Walk manually, per-directory,
+    // so a transient failure skips only the offending directory; reparse points (junctions /
+    // symlinks) are skipped to avoid cycles.
+    private List<string> SafeEnumerateMarkdown(string root, bool recurse)
+    {
+        var results = new List<string>();
+        var stack = new Stack<string>();
+        stack.Push(root);
+        while (stack.Count > 0)
+        {
+            var dir = stack.Pop();
+            var files = RetryDir(() => Directory.GetFiles(dir, "*.md", SearchOption.TopDirectoryOnly), dir);
+            if (files != null) results.AddRange(files);
+            if (!recurse) continue;
+
+            var subs = RetryDir(() => Directory.GetDirectories(dir), dir);
+            if (subs == null) continue;
+            foreach (var sub in subs)
+            {
+                try { if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0) continue; }
+                catch { continue; }   // vanished mid-walk — skip
+                stack.Push(sub);
+            }
+        }
+        return results;
+    }
+
+    // Run a directory query, briefly retrying a transient failure, then giving up on THIS
+    // directory only (returns null) instead of letting the exception abort the whole scan.
+    // A give-up is LOGGED (not silent) so a skipped directory is visible in huddle.log.
+    private string[]? RetryDir(Func<string[]> query, string dir)
+    {
+        Exception? last = null;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try { return query(); }
+            catch (Exception ex) { last = ex; if (attempt < 2) System.Threading.Thread.Sleep(15); }
+        }
+        _log($"docs: skipped unreadable directory after retries — {dir} ({last?.Message})");
+        return null;
     }
 
     private void AddFile(string file, string repoName, DocLevel maxLevel, List<DocumentEntry> results)

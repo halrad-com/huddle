@@ -144,12 +144,31 @@ public class ConsoleUI
                         Console.Write($"  [{instance.ActivePersona}]");
                     }
 
+                    // Surface whether a running session has a console window or is headless.
+                    if (instance.Status == SessionStatus.Running)
+                    {
+                        var headless = IsHeadless(instance);
+                        Console.ForegroundColor = headless ? ConsoleColor.Yellow : ConsoleColor.DarkGray;
+                        Console.Write(headless ? "  headless" : "  windowed");
+                    }
+
                     Console.WriteLine();
                 }
                 finally { Console.ResetColor(); }
             }
         }
         Console.WriteLine();
+    }
+
+    // A running session is "headless" when its process has no top-level window handle
+    // (no console window). MainWindowHandle is also briefly zero right after spawn, before
+    // the console is created, so a just-started session can read headless for a moment.
+    private static bool IsHeadless(SessionInstance instance)
+    {
+        var proc = instance.Process;
+        if (proc == null) return false;
+        try { proc.Refresh(); return proc.MainWindowHandle == IntPtr.Zero; }
+        catch { return false; }
     }
 
     public void PrintHelp()
@@ -1349,17 +1368,150 @@ public class ConsoleUI
             return;
         }
 
+        // Section 1: leaked resources (orphan processes).
         var ledger = new ResourceLedger(Ipc.ResLedgerDir, Log);
         var leaks = ledger.FindLeaks();
-        if (leaks.Count == 0)
+        if (leaks.Count > 0)
         {
-            Console.WriteLine("janitor: no leaked resources.");
-            return;
+            foreach (var (safe, entry) in leaks)
+                Console.WriteLine(ResourceLedger.FormatLeak(safe, entry));
+            Console.WriteLine($"janitor: {leaks.Count} leak(s). Reclaim: scripts/sweep-orphans.ps1 -Kill");
         }
-        foreach (var (safe, entry) in leaks)
-            Console.WriteLine(ResourceLedger.FormatLeak(safe, entry));
-        Console.WriteLine($"janitor: {leaks.Count} leak(s). Reclaim: scripts/sweep-orphans.ps1 -Kill");
+
+        // Section 2: stale mail — unprocessed mail still sitting in inboxes.
+        var staleShown = ReportStaleMail();
+
+        if (leaks.Count == 0 && !staleShown)
+            Console.WriteLine("janitor: no leaked resources, no stale mail.");
     }
+
+    // Stale-mail section for janitor. Anything still in an ipc/<recipient>/inbox/ is
+    // unprocessed (delivered mail is moved to processed/). Mail to a STOPPED recipient is
+    // "old business" that can rot silently — surface it for review (tasks flagged). Mail to a
+    // RUNNING recipient is just awaiting that agent's next turn — shown as a count, not rot.
+    // Report-only; moves/archives nothing. Returns true if it printed anything.
+    private bool ReportStaleMail()
+    {
+        var ipcRoot = Ipc!.IpcDir;
+        if (!Directory.Exists(ipcRoot)) return false;
+
+        var runningIds = new HashSet<string>(
+            _manager.Instances.Values
+                .Where(i => i.Status == SessionStatus.Running)
+                .Select(i => i.SafePathName),
+            StringComparer.OrdinalIgnoreCase);
+
+        var deadMail = new SortedDictionary<string, List<(bool isTask, string age, string from, string subject)>>(
+            StringComparer.OrdinalIgnoreCase);
+        var liveWaiting = 0;
+        var deadTaskCount = 0;
+
+        foreach (var recipientDir in Directory.GetDirectories(ipcRoot))
+        {
+            var recipient = Path.GetFileName(recipientDir);
+            var inbox = Path.Combine(recipientDir, "inbox");
+            if (!Directory.Exists(inbox)) continue;
+
+            var alive = runningIds.Contains(recipient);
+            foreach (var file in Directory.GetFiles(inbox, "*.json"))
+            {
+                if (alive) { liveWaiting++; continue; }
+
+                string from = "?", type = "?", subject = "";
+                DateTime? ts = null;
+                try
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(file));
+                    var root = doc.RootElement;
+                    if (root.TryGetProperty("from", out var f)) from = f.GetString() ?? "?";
+                    if (root.TryGetProperty("type", out var t)) type = t.GetString() ?? "?";
+                    if (root.TryGetProperty("subject", out var s)) subject = s.GetString() ?? "";
+                    if (root.TryGetProperty("timestamp", out var e)
+                        && e.ValueKind == System.Text.Json.JsonValueKind.String
+                        && DateTime.TryParse(e.GetString(), out var parsed)) ts = parsed;
+                }
+                catch { continue; }   // malformed / locked — skip, don't abort the listing
+
+                ts ??= SafeMtime(file);
+                var isTask = string.Equals(type, "task", StringComparison.OrdinalIgnoreCase);
+                if (isTask) deadTaskCount++;
+
+                if (!deadMail.TryGetValue(recipient, out var list))
+                    deadMail[recipient] = list = new();
+                list.Add((isTask, FormatAge(ts.Value), from, subject));
+            }
+        }
+
+        var deadTotal = deadMail.Sum(kv => kv.Value.Count);
+        if (deadTotal == 0 && liveWaiting == 0) return false;
+
+        Console.WriteLine();
+        if (deadTotal > 0)
+        {
+            try
+            {
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                var taskNote = deadTaskCount > 0 ? $", {deadTaskCount} task{(deadTaskCount == 1 ? "" : "s")}" : "";
+                Console.WriteLine($"  old business — {deadTotal} unprocessed for stopped recipients{taskNote} (review, don't lose):");
+            }
+            finally { Console.ResetColor(); }
+
+            foreach (var (recipient, list) in deadMail)
+            {
+                try
+                {
+                    Console.ForegroundColor = ConsoleColor.DarkGray;
+                    Console.WriteLine($"  [stopped] {recipient.Replace('_', ':')}");
+                    foreach (var (isTask, age, from, subject) in list.OrderByDescending(x => x.isTask))
+                    {
+                        Console.ForegroundColor = isTask ? ConsoleColor.Yellow : ConsoleColor.DarkGray;
+                        var mark = isTask ? "⚠ task" : "  info";
+                        Console.WriteLine($"     {mark}  {age,4}  from {from.Replace('_', ':'),-26}  {Truncate(subject, 54)}");
+                    }
+                }
+                finally { Console.ResetColor(); }
+            }
+
+            if (deadTaskCount > 0)
+            {
+                try
+                {
+                    Console.ForegroundColor = ConsoleColor.DarkGray;
+                    Console.WriteLine("  ↳ task(s) to a stopped recipient may be dropped work — 'messages <instance>' to read; re-dispatch by role or archive once resolved.");
+                }
+                finally { Console.ResetColor(); }
+            }
+        }
+
+        if (liveWaiting > 0)
+        {
+            try
+            {
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.WriteLine($"  +{liveWaiting} unprocessed for running agents (normal — awaiting their next turn).");
+            }
+            finally { Console.ResetColor(); }
+        }
+
+        return true;
+    }
+
+    private static DateTime SafeMtime(string file)
+    {
+        try { return File.GetLastWriteTime(file); } catch { return DateTime.Now; }
+    }
+
+    private static string FormatAge(DateTime ts)
+    {
+        var span = DateTime.Now - ts;
+        if (span.TotalDays >= 1) return $"{(int)span.TotalDays}d";
+        if (span.TotalHours >= 1) return $"{(int)span.TotalHours}h";
+        if (span.TotalMinutes >= 1) return $"{(int)span.TotalMinutes}m";
+        return "now";
+    }
+
+    private static string Truncate(string s, int max)
+        => string.IsNullOrEmpty(s) ? "(no subject)" : (s.Length <= max ? s : s[..(max - 1)] + "…");
 
     private void HandleConflicts()
     {
@@ -1584,6 +1736,42 @@ public class ConsoleUI
         return null;
     }
 
+    // Durable orchestrator log. Console output is ephemeral — it scrolls away when
+    // the window closes — so this append-only file is the record of what actually
+    // happened: every command entered and every shutdown decision, with its reason.
+    // An abnormal teardown must never again be unreconstructable.
+    private static string? _logFilePath;
+    private static readonly object _logFileLock = new();
+
+    // Point the durable log at a file and stamp a session-open marker. Call once at startup.
+    public static void SetLogFile(string path)
+    {
+        _logFilePath = path;
+        AppendToLogFile($"===== huddle {BuildInfo.Short} log opened =====");
+    }
+
+    // Append one timestamped line to the durable log. Never throws — logging must
+    // never be able to take huddle down.
+    private static void AppendToLogFile(string message)
+    {
+        var path = _logFilePath;
+        if (path is null) return;
+        try
+        {
+            lock (_logFileLock)
+                File.AppendAllText(path, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
+        }
+        catch { /* durable log is best-effort; a write failure stays silent */ }
+    }
+
+    // Record the exact command line the operator entered — file only. The console
+    // already echoed the keystrokes, so re-printing them would just be noise.
+    public static void LogInput(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return;
+        AppendToLogFile($"> {line}");
+    }
+
     public static void Log(string message)
     {
         try
@@ -1593,6 +1781,7 @@ public class ConsoleUI
         }
         finally { Console.ResetColor(); }
         Console.WriteLine(message);
+        AppendToLogFile(message);
     }
 
     public static void LogCrash(string message)
@@ -1605,6 +1794,7 @@ public class ConsoleUI
             Console.WriteLine(message);
         }
         finally { Console.ResetColor(); }
+        AppendToLogFile($"CRASH: {message}");
     }
 
     private static string ShortenPath(string path)
