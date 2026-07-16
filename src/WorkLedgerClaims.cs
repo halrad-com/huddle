@@ -72,6 +72,25 @@ public class WorkLedgerClaims
     }
 
     /// <summary>
+    /// Atomically check a proposed claim against every active claim and write it
+    /// only if no OTHER session holds any of its files (a session may always extend
+    /// its own scope). Check-and-write happen under one lock so two concurrent
+    /// claimants cannot both win the same file. On rejection nothing is written
+    /// and the conflicts name each holder and the shared files.
+    /// </summary>
+    public bool TryClaim(WorkLedgerClaim claim, out List<ClaimOverlap> conflicts)
+    {
+        lock (_lock)
+        {
+            var active = ReadAll(); // Monitor is reentrant — safe under _lock
+            conflicts = FindConflictsWithActive(new[] { claim }, active);
+            if (conflicts.Count > 0) return false;
+            WriteCore(claim);
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Read and parse a single claim file. Returns null on malformed input (and logs).
     /// </summary>
     public WorkLedgerClaim? ReadFile(string path)

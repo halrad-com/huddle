@@ -155,6 +155,7 @@ public class SessionManager
                 "  task-progress — body: {\"taskId\":\"T001\",\"notes\":\"update\"}",
                 "  broadcast — body: {\"subject\":\"...\",\"body\":\"...\",\"type\":\"info\",\"targets\":\"all\"|[...],\"exclude\":[...],\"repo\":\"name-or-alias[,more]\" (optional — only that repo's agents)}",
                 "  dispatch-batch — body: {\"batchId\":\"B-...\",\"tasks\":[{\"repo\":\"...\",\"persona\":\"...\",\"prompt\":\"...\",\"files\":[\"...\"]}]}",
+                "  claim — body: {\"repo\":\"name-or-alias\",\"files\":[\"path/to/file\"]} (MANDATORY before substantive edits unless your work arrived via dispatch-batch; include the plan doc's path to lock a whole plan; ack:claim = yours, nack:claim = someone else holds it — do NOT edit, coordinate by mail)",
                 "  release — body: {\"files\":[\"path/to/file\"]}",
                 "",
                 "Responses arrive in your inbox as type: \"info\". Subject \"ack:<command>\" = accepted; subject \"nack:<command>\" = rejected (body is the reason). Always check the prefix before assuming a command succeeded."
@@ -549,7 +550,11 @@ public class SessionManager
             _log($"Stopping '{instance.InstanceId}'{personaLabel} (PID {proc?.Id}, uptime {uptime})...");
         }
 
-        // Stop the process outside the lock
+        // Stop the process outside the lock. The session is only marked Stopped
+        // when the process has VERIFIABLY exited — a stop that fails to kill must
+        // not report success, or the agent keeps working untracked and unclaimed
+        // while huddle believes it's gone (2026-07-16 incident).
+        var exited = false;
         if (proc != null)
         {
             try
@@ -561,11 +566,28 @@ public class SessionManager
                     proc.Kill(entireProcessTree: true);
                     proc.WaitForExit(3000);
                 }
+                exited = proc.HasExited;
+            }
+            catch (InvalidOperationException)
+            {
+                // Process already exited / handle no longer associated — that IS dead.
+                exited = true;
             }
             catch (Exception ex)
             {
                 _log($"Error stopping '{instance.InstanceId}': {ex.Message}");
+                try { exited = proc.HasExited; } catch { exited = false; }
             }
+        }
+
+        if (!exited)
+        {
+            lock (instance.Lock)
+            {
+                instance.Status = SessionStatus.Running;
+            }
+            _log($"STOP FAILED: '{instance.InstanceId}' (PID {proc?.Id}) is still running — session stays tracked with its claims. Retry, or kill PID {proc?.Id} manually.");
+            return false;
         }
 
         lock (instance.Lock)
@@ -706,6 +728,49 @@ public class SessionManager
         {
             Process.Start(psi);
             _log($"resume: launched {instance.ResumeCommand}  (in {instance.Root})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log($"resume: failed to launch — {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Resume a session known only by its transcript (the `history` verb) — it may
+    /// never have been one of this huddle's instances. Same live-writer guard as
+    /// the instance-based resume: if any tracked instance is alive on this session
+    /// id, refuse (two writers fork/corrupt the transcript JSONL).
+    /// </summary>
+    public bool ResumeTranscript(string sessionId, string cwd)
+    {
+        if (!Guid.TryParse(sessionId, out var guid))
+        {
+            _log($"resume: '{sessionId}' is not a session id.");
+            return false;
+        }
+
+        var live = _instances.Values.FirstOrDefault(i =>
+            i.IsAlive && i.SessionId.HasValue && i.SessionId.Value == guid);
+        if (live != null)
+        {
+            _log($"resume: session {sessionId} is still running as {live.InstanceId} — stop it first.");
+            return false;
+        }
+
+        var workDir = Directory.Exists(cwd) ? cwd : ".";
+        var psi2 = new ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            Arguments = $"/c title huddle-resume: {guid} && set BUN_CRASH_REPORTER_URL= && \"{_claudePath}\" --resume {guid}",
+            WorkingDirectory = workDir,
+            UseShellExecute = true,
+        };
+        try
+        {
+            Process.Start(psi2);
+            _log($"resume: launched claude --resume {guid}  (in {workDir})");
             return true;
         }
         catch (Exception ex)

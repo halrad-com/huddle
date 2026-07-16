@@ -2,6 +2,9 @@ namespace Huddle;
 
 class Program
 {
+    // Held for the process lifetime; the OS releases it however huddle dies.
+    private static Mutex? _singleton;
+
     static int Main(string[] args)
     {
         // Helper-process mode. The parent huddle's PromptInjector.Inject
@@ -123,6 +126,34 @@ class Program
 
         // Data and personas directories — next to huddle.json
         var configDir = Path.GetDirectoryName(Path.GetFullPath(configPath)) ?? ".";
+
+        // Singleton guard. Two huddle instances sharing one root double-execute
+        // every inbox command — two spawns per start, two workers per dispatch,
+        // context.md ping-ponging between two registries (2026-07-16 incident).
+        // Keyed to the root directory so separate huddle roots
+        // can still run side-by-side. An abandoned mutex (previous instance
+        // crashed while holding it) still counts as acquired.
+        var rootKey = Path.GetFullPath(configDir).TrimEnd(Path.DirectorySeparatorChar).ToLowerInvariant();
+        var mutexName = "Local\\huddle-" + Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(rootKey)))[..16];
+        _singleton = new Mutex(initiallyOwned: false, mutexName);
+        try
+        {
+            if (!_singleton.WaitOne(TimeSpan.Zero))
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"Another huddle instance is already running for {rootKey}.");
+                Console.WriteLine("Two instances double-execute every command: duplicate sessions, double dispatches, clobbered state.");
+                Console.WriteLine("Close the other huddle window first (find it: tasklist | findstr huddle).");
+                Console.ResetColor();
+                return 1;
+            }
+        }
+        catch (AbandonedMutexException)
+        {
+            // Previous holder died without releasing — we now own it. Proceed.
+        }
+
         var dataDir = Path.Combine(configDir, "logs");
         Directory.CreateDirectory(dataDir);
         var personasDir = Path.Combine(configDir, "personas");

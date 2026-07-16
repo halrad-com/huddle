@@ -299,6 +299,9 @@ public class Orchestrator : IDisposable
             case "dispatch-batch":
                 HandleDispatchBatch(msg);
                 break;
+            case "claim":
+                HandleClaim(msg);
+                break;
             case "release":
                 HandleRelease(msg);
                 break;
@@ -825,6 +828,76 @@ public class Orchestrator : IDisposable
         }
     }
 
+    // Runtime claim: the arbiter for sessions whose work did NOT arrive via
+    // dispatch-batch (console-started, operator-typed, mail-triggered). Before
+    // substantive edits a session claims its file scope — include the plan doc
+    // itself in the list to lock a whole plan. Granted claims live in the same
+    // claims dir the queue checks, so batches and runtime claimants can never
+    // dispatch over each other. Two agents executing one plan in parallel with
+    // no arbiter is the 2026-07-16 incident.
+    private static int _runtimeClaimSeq;
+
+    private void HandleClaim(IpcMessage msg)
+    {
+        try
+        {
+            var body = msg.BodyObject;
+            if (body.ValueKind != JsonValueKind.Object)
+            {
+                SendNack(msg.From, msg.Subject, "body must be an object");
+                return;
+            }
+
+            var repo = StringProp(body, "repo");
+            if (string.IsNullOrWhiteSpace(repo))
+            {
+                SendNack(msg.From, msg.Subject, "repo required");
+                return;
+            }
+            var resolvedRepo = _manager.ResolveRepoName(repo);
+            if (!_manager.Repos.TryGetValue(resolvedRepo, out var repoDef))
+            {
+                SendNack(msg.From, msg.Subject, $"unknown repo '{repo}'");
+                return;
+            }
+
+            var files = new List<string>();
+            if (body.TryGetProperty("files", out var fEl) && fEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var fe in fEl.EnumerateArray())
+                    if (fe.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(fe.GetString()))
+                        files.Add(fe.GetString()!.Trim());
+            }
+            if (files.Count == 0)
+            {
+                SendNack(msg.From, msg.Subject, "files array required (declare your edit scope; include the plan doc to lock a plan)");
+                return;
+            }
+
+            var baseSha = GitHelper.GetHeadSha(repoDef.Root) ?? "";
+            var claimId = $"R-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Interlocked.Increment(ref _runtimeClaimSeq)}";
+            var claim = new WorkLedgerClaim(msg.From, resolvedRepo, claimId, DateTime.UtcNow, baseSha, files);
+
+            if (_claims.TryClaim(claim, out var conflicts))
+            {
+                _log($"Orchestrator: claim granted — {msg.From} holds {files.Count} file(s) in {resolvedRepo} ({claimId})");
+                SendAck(msg.From, msg.Subject, $"claimed {files.Count} file(s) in {resolvedRepo} — release when done");
+            }
+            else
+            {
+                var detail = string.Join("; ", conflicts.Select(o =>
+                    $"{o.B.SessionId} holds {string.Join(", ", o.SharedFiles)}"));
+                _log($"Orchestrator: claim REJECTED — {msg.From}: {detail}");
+                SendNack(msg.From, msg.Subject, $"conflict: {detail} — do NOT edit those files; mail the holder to coordinate, or re-claim after they release");
+            }
+        }
+        catch (Exception ex)
+        {
+            _log($"Orchestrator: Error in claim: {ex.Message}");
+            SendNack(msg.From, msg.Subject, ex.Message);
+        }
+    }
+
     private void HandleRelease(IpcMessage msg)
     {
         try
@@ -873,11 +946,12 @@ public class Orchestrator : IDisposable
                     .Select(c => c.BatchId)
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var doneUnits = beforeUnits.Where(b => !afterUnits.Contains(b)).ToList();
-                if (doneUnits.Count > 0)
-                {
-                    foreach (var id in doneUnits) _queue.MarkDone(id);
-                    AdvanceQueue();
-                }
+                foreach (var id in doneUnits) _queue.MarkDone(id); // no-op for runtime R-* claims
+
+                // Any successful release may free a file a queued unit needs —
+                // including a partial release (claim shrinks, no unit done) and
+                // runtime-claim releases the queue can't see. Always advance.
+                AdvanceQueue();
 
                 SendAck(msg.From, msg.Subject, $"released {released}");
             }
@@ -970,7 +1044,20 @@ public class Orchestrator : IDisposable
             var root = _manager.Repos.TryGetValue(u.Repo, out var def) ? def.Root : ".";
             var baseSha = GitHelper.GetHeadSha(root) ?? "";
             var sessionId = $"{u.Repo}:{u.Persona}";
-            _claims.Write(new WorkLedgerClaim(sessionId, u.Repo, u.Id, DateTime.UtcNow, baseSha, u.Files));
+
+            // The queue only knows about its own units; a runtime claim (claim
+            // command) is invisible to Dispatchable(). Acquire through the same
+            // arbiter so a batch can never dispatch over a runtime claimant —
+            // on conflict the unit simply stays queued and retries on the next
+            // advance (a release/stop always triggers one).
+            if (!_claims.TryClaim(new WorkLedgerClaim(sessionId, u.Repo, u.Id, DateTime.UtcNow, baseSha, u.Files), out var extConflicts))
+            {
+                var detail = string.Join("; ", extConflicts.Select(o =>
+                    $"{o.B.SessionId} holds {string.Join(", ", o.SharedFiles)}"));
+                _log($"queue: {u.Id} blocked by active claim — {detail}; stays queued");
+                continue;
+            }
+
             var ok = _manager.Start(u.Repo, u.Persona, prompt: u.Prompt);
             if (ok)
             {

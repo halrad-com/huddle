@@ -201,6 +201,7 @@ public class ConsoleUI
             Console.WriteLine("  replay <repo> [host[:port]]  Run the repo's captured regression tests; optional cross-box DUT target");
             Console.WriteLine("  docs [plans|churn] [@repo] [kw] [-1d/-1w]  List docs; @repo, kw=folder/title, -Nd/-Nw=time window");
             Console.WriteLine("  open <n>                 Open the nth document from the last 'docs' listing");
+            Console.WriteLine("  history [@repo] [kw] [-1d/-1w]  List past sessions from transcripts; 'history <n>' for detail, 'resume <n>' to reopen");
             Console.WriteLine("  direct <english task>    Hand a task to huddle:architect to plan + dispatch automatically");
             Console.WriteLine("  quit                     Exit huddle, sessions keep running");
             Console.WriteLine("  shutdown                 Stop all sessions and exit");
@@ -343,9 +344,15 @@ public class ConsoleUI
 
             case "resume":
                 if (string.IsNullOrEmpty(arg))
-                    Log("Usage: resume <instance|repo:persona>");
+                    Log("Usage: resume <instance|repo:persona|n>  (n = row from the last 'history' listing)");
+                else if (int.TryParse(arg.Trim(), out var historyIdx))
+                    HandleHistoryResume(historyIdx);
                 else
                     _manager.Resume(arg);
+                break;
+
+            case "history":
+                HandleHistory(arg);
                 break;
 
             case "personas" or "p":
@@ -954,6 +961,194 @@ public class ConsoleUI
         if (_docOpener.Open(entry.Path, Log))
             Log($"open: {entry.Path}");
     }
+
+    // ---- `history` — list past sessions from Claude Code transcripts ----------
+    // Spec: docs/superpowers/specs/2026-07-14-session-history-verb-design.md
+    // Filters reuse the docs grammar (@repo, keyword, -N{h,d,w}); `history <n>`
+    // shows detail and loads that session's files into _lastDocs so `open <n>`
+    // works unchanged; `resume <n>` reopens the conversation in its cwd.
+
+    private const int HistoryPageSize = 15;
+    private List<SessionSummary> _lastHistory = new();
+    private int _historyPageOffset;
+
+    private TranscriptStore CreateTranscriptStore()
+    {
+        var projectsRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "projects");
+        var roots = _manager.Repos.ToDictionary(kv => kv.Key, kv => kv.Value.Root, StringComparer.OrdinalIgnoreCase);
+        return new TranscriptStore(projectsRoot, roots, Log);
+    }
+
+    private void HandleHistory(string arg)
+    {
+        var a = arg.Trim();
+
+        if (a.Equals("more", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_lastHistory.Count == 0) { Log("No listing to continue — run 'history' first."); return; }
+            if (_historyPageOffset >= _lastHistory.Count) { Log("End of list — all sessions shown."); return; }
+            PrintHistoryPage();
+            return;
+        }
+
+        // `history <n>` — detail view for a row of the last listing.
+        if (int.TryParse(a, out var idx))
+        {
+            PrintHistoryDetail(idx);
+            return;
+        }
+
+        // Filters: @repo, -N{h,d,w}, remaining tokens = keyword (docs grammar).
+        DateTime? cutoff = null;
+        string? window = null;
+        string? repoFilter = null;
+        var keywordParts = new List<string>();
+        foreach (var t in a.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (t.StartsWith('@') && t.Length > 1)
+            {
+                repoFilter = _manager.ResolveRepoName(t[1..].ToLowerInvariant());
+                continue;
+            }
+            var c = ParseWindow(t);
+            if (c.HasValue) { cutoff = c; window = t.TrimStart('-'); }
+            else keywordParts.Add(t);
+        }
+        var keyword = string.Join(' ', keywordParts).Trim();
+
+        var store = CreateTranscriptStore();
+        _lastHistory = store.ListSessions(new HistoryFilter(repoFilter, keyword.Length > 0 ? keyword : null, cutoff)).ToList();
+        _historyPageOffset = 0;
+
+        if (_lastHistory.Count == 0)
+        {
+            var qual = new List<string>();
+            if (repoFilter != null) qual.Add($"in repo '{repoFilter}'");
+            if (keyword.Length > 0) qual.Add($"matching '{keyword}'");
+            if (window != null) qual.Add($"in the last {window}");
+            Log(qual.Count > 0 ? $"No sessions {string.Join(" ", qual)}." : "No session transcripts found.");
+            return;
+        }
+
+        PrintHistoryPage();
+        var summary = $"{_lastHistory.Count} session(s)";
+        if (repoFilter != null) summary += $" in {repoFilter}";
+        if (keyword.Length > 0) summary += $" matching '{keyword}'";
+        if (window != null) summary += $" in the last {window}";
+        if (store.LastListTruncated) summary += $" (newest {TranscriptStore.MaxScan} transcripts scanned)";
+        Log($"{summary}. 'history <n>' for detail, 'resume <n>' to reopen.");
+    }
+
+    private void PrintHistoryPage()
+    {
+        Console.WriteLine();
+        var end = Math.Min(_historyPageOffset + HistoryPageSize, _lastHistory.Count);
+        for (var i = _historyPageOffset; i < end; i++)
+        {
+            var s = _lastHistory[i];
+            try
+            {
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.Write($"  {i + 1,3}. ");
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.Write($"[{s.Repo}]".PadRight(14));
+                Console.ForegroundColor = ConsoleColor.White;
+                Console.Write($" {s.Title,-70}");
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.Write($"  {FormatWhen(s.LastActivity)}");
+                if (s.FileCount > 0) Console.Write($"  {s.FileCount} file(s)");
+                Console.WriteLine();
+            }
+            finally { Console.ResetColor(); }
+        }
+        _historyPageOffset = end;
+        var remaining = _lastHistory.Count - end;
+        if (remaining > 0)
+        {
+            try
+            {
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.WriteLine($"  … {remaining} more — 'history more' for the next {Math.Min(HistoryPageSize, remaining)}");
+            }
+            finally { Console.ResetColor(); }
+        }
+        Console.WriteLine();
+    }
+
+    private void PrintHistoryDetail(int n)
+    {
+        if (_lastHistory.Count == 0) { Log("No listing — run 'history' first."); return; }
+        if (n < 1 || n > _lastHistory.Count) { Log($"Usage: history <n>  (1..{_lastHistory.Count})"); return; }
+
+        var s = _lastHistory[n - 1];
+        var detail = CreateTranscriptStore().GetDetail(s.Id);
+        if (detail == null) { Log($"history: transcript for {s.Id} no longer readable."); return; }
+
+        Console.WriteLine();
+        try
+        {
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine($"  {s.Title}");
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"  {s.Repo} · {s.Cwd} · {FormatStamp(s.StartedAt)} → {FormatStamp(s.LastActivity)} · session {s.Id[..Math.Min(8, s.Id.Length)]}");
+            Console.WriteLine();
+            if (s.OpeningPrompt.Length > 0)
+                Console.WriteLine($"  Started with:  \"{s.OpeningPrompt}\"");
+            if (detail.LastPrompt.Length > 0)
+                Console.WriteLine($"  Left off at:   \"{detail.LastPrompt}\"");
+
+            if (detail.Files.Count > 0)
+            {
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.White;
+                Console.WriteLine($"  Files this session wrote ({detail.Files.Count}):");
+                // Load into _lastDocs so the existing `open <n>` works unchanged.
+                _lastDocs = detail.Files.Select(f => new DocumentEntry(
+                    Title: Path.GetFileName(f), Path: f, SourceSession: s.Id[..Math.Min(8, s.Id.Length)],
+                    Repo: s.Repo, Timestamp: null, Level: DocLevel.Output, Note: "history")).ToList();
+                _docsPageOffset = _lastDocs.Count; // listing fully shown here; 'docs more' N/A
+                var shown = Math.Min(detail.Files.Count, 20);
+                for (var i = 0; i < shown; i++)
+                {
+                    var exists = File.Exists(detail.Files[i]);
+                    Console.ForegroundColor = exists ? ConsoleColor.Gray : ConsoleColor.DarkGray;
+                    Console.WriteLine($"    {i + 1,3}. {Hyperlink(detail.Files[i], detail.Files[i])}{(exists ? "" : "  (gone)")}");
+                }
+                if (detail.Files.Count > shown)
+                {
+                    Console.ForegroundColor = ConsoleColor.DarkGray;
+                    Console.WriteLine($"    … {detail.Files.Count - shown} more");
+                }
+            }
+
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine();
+            Console.WriteLine($"  → 'open <n>' to open a file · 'resume {n}' to reopen this conversation");
+        }
+        finally { Console.ResetColor(); }
+        Console.WriteLine();
+    }
+
+    private void HandleHistoryResume(int n)
+    {
+        if (_lastHistory.Count == 0) { Log("No listing — run 'history' first (resume <n> picks from it)."); return; }
+        if (n < 1 || n > _lastHistory.Count) { Log($"Usage: resume <n>  (1..{_lastHistory.Count})"); return; }
+        var s = _lastHistory[n - 1];
+        _manager.ResumeTranscript(s.Id, s.Cwd);
+    }
+
+    private static string FormatWhen(DateTime? t)
+    {
+        if (!t.HasValue) return "unknown";
+        var d = DateTime.Now.Date - t.Value.Date;
+        if (d.TotalDays < 1) return $"today {t:HH:mm}";
+        if (d.TotalDays < 2) return $"yesterday {t:HH:mm}";
+        if (d.TotalDays < 7) return $"{(int)d.TotalDays} days ago";
+        return $"{t:yyyy-MM-dd}";
+    }
+
+    private static string FormatStamp(DateTime? t) => t.HasValue ? $"{t:yyyy-MM-dd HH:mm}" : "?";
 
     // OSC 8 hyperlink escape sequence: ESC ]8;;URI ST  text  ESC ]8;; ST
     // Build the file URI with new Uri(...).AbsoluteUri — it percent-encodes spaces,

@@ -45,25 +45,41 @@ Use these terms consistently across all projects:
 
 Do not conflate these. A roadmap item is not a backlog entry. A backlog entry is not an issue unless something is broken. An issue is not a roadmap item.
 
-## Work Coordination
+## Work Coordination — claims are MANDATORY, not advisory
 
-Before starting substantive file changes, check the work ledger at `ipc/workledger/` 
-for what other sessions on your repo are working on:
+**Rule: no substantive edits without a granted claim.** On 2026-07-16 two sessions
+executed the same plan in parallel with no claims — duplicated hours, corrupted a
+product file. The freeform ledger alone did not prevent it. The
+orchestrator is now the arbiter.
 
-1. Read all `.md` files in the workledger directory
-2. If any active entries claim files you plan to modify, coordinate first:
-   - Stale entries (session not running per context.md) can be ignored
-   - Area overlap with different files: proceed, note it in your entry
-   - Same file overlap: send an IPC message to that session before proceeding
-3. Write/update your own ledger entry at: ipc/workledger/<your-safe-name>.md
+**Before your first substantive edit** (any multi-file work, any plan execution,
+anything beyond a trivial one-liner):
 
-Your ledger file should include:
-- What you're working on
-- Which files you expect to modify
-- Updated timestamp (update at each checkpoint)
-- Status: active, paused, or done
+1. **If your task arrived via `dispatch-batch`, your claim already exists** — the
+   orchestrator wrote it when it spawned you. Skip to step 3.
+2. **Otherwise (console-started, operator-typed task, mail-triggered, self-initiated):
+   send a `claim` command** to `<ipc-root>/_huddle/inbox/`:
 
-Update your entry when your focus changes. Set status to 'done' or delete it when finished.
+   ```json
+   {"from":"<your-instance-id>","to":"_huddle","timestamp":"<ISO-8601-UTC>",
+    "type":"command","subject":"claim",
+    "body":{"repo":"<repo-name>","files":["path/one.cs","docs/superpowers/plans/the-plan.md"]}}
+   ```
+
+   - **Executing a plan? Include the plan doc's path in `files`.** That locks the
+     plan itself — a second session trying to run the same plan gets nacked on the
+     plan file before any code collides.
+   - **Wait for the reply.** `ack:claim` = the files are yours. `nack:claim` = another
+     session holds them — the nack names the holder. **Do NOT edit those files.**
+     Mail the holder to coordinate, or wait and re-claim after they release.
+   - Claim your REAL scope up front. Extending your own claim later is allowed
+     (send another `claim`), but claim-as-you-go risks a mid-plan nack.
+3. **Commit-then-release** as you finish (see the release idiom below). Your claims
+   are auto-released when your session stops.
+
+**The freeform ledger entry** at `ipc/workledger/<your-safe-name>.md` is still
+required as human-readable status — what you're doing, expected files, timestamp,
+status: active/paused/done — but it is narrative, not the lock. The claim is the lock.
 
 ## Branch Discipline
 

@@ -70,6 +70,14 @@ Missing JSON files = current behavior. Tuning is purely opt-in.
 - **Arrays** (tools, pluginDirs, addDirs) — persona **replaces** shared (not concat)
 - **Objects** (mcpServers, agents, settingsOverride) — per-key merge
 
+## Model policy (operator rule, 2026-07-16)
+
+`_shared.json` pins the model floor (`claude-opus-4-8`, effort `high`) and MUST keep a
+model pinned. Do not unpin to "inherit CLI default" — that was tried (`5157b0d`) and caused
+two regressions: agents hand-writing malformed IPC JSON (2026-07-04) and sub-par agent code
+during the 2026-07-16 incident. Sonnet/Haiku are not to be used for huddle sessions;
+per-persona overrides may only move the model up, not down.
+
 ## Hot reload
 
 Not supported. Persona config is captured at spawn time. Edit the JSON, then `stop-session` + `start-session` to apply.
