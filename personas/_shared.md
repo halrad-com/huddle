@@ -35,6 +35,16 @@ Firefox is first-class, not an afterthought. Test Firefox first. Cross-browser f
 
 Add logging as part of the initial implementation, not as an afterthought during debugging. Network calls, state changes, and decision points should have logging from the start. Use appropriate log levels.
 
+### Shell Discipline
+
+Sessions run under a *gated* command allowlist — no unfettered access, but simple commands that match a pattern run without a prompt. Two habits keep the gate quiet and keep you moving; they are not optional:
+
+1. **Prefer the dedicated tools over the shell.** Read, Grep, and Glob replace `cat`/`grep`/`find`/`ls` pipelines. They never prompt, return structured output, and are *cheaper* than a shell chain — one call, no subshell. Reach for Bash only when no dedicated tool fits.
+
+2. **Keep every Bash call single-purpose and allowlist-shaped.** One command (`git status`, `dotnet build src/foo.csproj`). Do **not** stitch steps with `;`, `&&`, or pipes, and do **not** pipe into an interpreter (`python -c`, `sed -i`, `awk '{...}'`) to save a round-trip. A compound command matches no allowlist pattern, so it prompts every time — and a headless session then hangs waiting for a human. Two simple calls cost a little more; a hang costs the whole task.
+
+Interpreters (`python -c`, `node -e`, `pwsh -Command`) run arbitrary code and are **not** auto-allowed — they prompt. If you're reaching for one to parse or transform text, use Read/Grep/Glob, or write a small named script file and run that instead.
+
 ## Standard Project Terminology
 
 Use these terms consistently across all projects:

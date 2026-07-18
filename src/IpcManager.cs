@@ -66,6 +66,22 @@ public class IpcManager : IDisposable
     private readonly ConcurrentDictionary<string, DateTime> _recentEvents =
         new(StringComparer.OrdinalIgnoreCase);
 
+    // Periodic inbox rescan. A nudge that couldn't be delivered — most often
+    // because the operator was typing at the recipient's console and injection
+    // was held (see PromptInjector.OperatorBusy) — leaves the mail in inbox/.
+    // Nothing else re-drives it until the next session-start Watch() or FSW
+    // event, so a held nudge could sit indefinitely after the operator freed
+    // the console. This timer re-runs delivery for still-pending mail, so a held
+    // nudge lands within one interval of the operator stepping away.
+    private readonly ConcurrentDictionary<string, string> _watchedInstances =
+        new(); // safePathName → instanceId
+    private System.Threading.Timer? _retryTimer;
+    private int _retryRunning; // 0/1 re-entrancy guard for the timer callback
+    private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(4);
+    // Only retry files older than this — fresh arrivals are the FSW's job, and
+    // this keeps the timer from racing an in-flight FSW delivery of the same file.
+    private static readonly TimeSpan RetryMinAge = TimeSpan.FromSeconds(2);
+
     /// <summary>
     /// Fired after a new message is successfully read from a session inbox.
     /// Host (Program) wires this to PromptInjector to wake the recipient with
@@ -95,6 +111,7 @@ public class IpcManager : IDisposable
         Directory.CreateDirectory(WorkLedgerDir);
         Directory.CreateDirectory(ClaimsDir);
         _log($"IPC directory: {ipcDir}");
+        _retryTimer = new System.Threading.Timer(RetryTick, null, RetryInterval, RetryInterval);
     }
 
     /// <summary>
@@ -156,6 +173,10 @@ public class IpcManager : IDisposable
             }
         }
 
+        // Remember which instance owns this inbox so the periodic retry timer
+        // can re-drive delivery for still-pending mail.
+        _watchedInstances[safePathName] = instanceId;
+
         // Catch-up scan runs unconditionally — outside the lock and outside the
         // already-watching guard. A leaked watcher from a prior session means
         // the live FSW fires for new mail but nothing drained queued mail on
@@ -203,12 +224,45 @@ public class IpcManager : IDisposable
         }
     }
 
+    // Periodic re-drive of undelivered mail. Runs every RetryInterval. For each
+    // watched inbox, re-processes pending files older than RetryMinAge (fresh
+    // ones belong to the FSW). Delivered mail was moved to processed/, so only
+    // genuinely-undelivered files remain — chiefly nudges held because the
+    // operator was at the recipient's console. Quiet: no per-file log spam;
+    // the visible signal is the mail leaving the inbox when it finally lands.
+    private void RetryTick(object? state)
+    {
+        if (Interlocked.Exchange(ref _retryRunning, 1) == 1) return; // a tick is still running
+        try
+        {
+            var cutoff = DateTime.UtcNow - RetryMinAge;
+            foreach (var kv in _watchedInstances)
+            {
+                var inbox = Path.Combine(_ipcDir, kv.Key, "inbox");
+                string[] files;
+                try { files = Directory.GetFiles(inbox, "*.json"); }
+                catch { continue; }
+                foreach (var file in files.OrderBy(f => f))
+                {
+                    try
+                    {
+                        if (File.GetLastWriteTimeUtc(file) > cutoff) continue; // fresh — FSW owns it
+                        ProcessInboxFile(kv.Value, file, Path.GetFileName(file), quiet: true);
+                    }
+                    catch { /* file may have been moved mid-scan; ignore */ }
+                }
+            }
+        }
+        catch (Exception ex) { _log($"IPC: retry tick failed: {ex.Message}"); }
+        finally { Interlocked.Exchange(ref _retryRunning, 0); }
+    }
+
     // Read, log, and dispatch a single mail file. Shared by FSW events and by
     // Watch() catch-up scans. On a successful nudge the file is auto-archived to
     // processed/ (I003) and the wake signal points there, so even a Write-only
     // persona never has to clear its own inbox and a reload can't re-fire it. A
     // failed delivery leaves the file in inbox/ to retry on the next scan / start.
-    private void ProcessInboxFile(string instanceId, string fullPath, string name)
+    private void ProcessInboxFile(string instanceId, string fullPath, string name, bool quiet = false)
     {
         if (!File.Exists(fullPath)) return;
 
@@ -238,7 +292,7 @@ public class IpcManager : IDisposable
                 Subject = $"mail file is not valid JSON ({name}); open it and read the raw text"
             };
         }
-        _log($"IPC [{instanceId}] from {msg.From}: {msg.Subject}");
+        if (!quiet) _log($"IPC [{instanceId}] from {msg.From}: {msg.Subject}");
 
         // Internal sender already handled the nudge (broadcast fan-out,
         // orchestrator ack/nack reply) and the body content is structured
@@ -510,6 +564,8 @@ public class IpcManager : IDisposable
 
     public void Dispose()
     {
+        _retryTimer?.Dispose();
+        _retryTimer = null;
         lock (_watchersLock)
         {
             foreach (var (_, watcher) in _watchers)

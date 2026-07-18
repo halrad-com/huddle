@@ -38,6 +38,22 @@ public static class PromptInjector
     private const ushort VK_RETURN = 0x0D;
     private const int HELPER_TIMEOUT_MS = 5000;
 
+    // Exit code the helper returns when it declines to inject because the
+    // operator is actively at the target console (see OperatorBusy). Distinct
+    // from success (0) and failure (1) so the parent treats it as "not
+    // delivered, retry later" rather than an error.
+    private const int HELD_EXIT = 3;
+
+    // A target console that is in the foreground is treated as "operator busy"
+    // — injecting there would interleave with whatever the operator is typing
+    // and the submit Enter would fire their half-typed line. We hold until they
+    // leave it or go idle. This grace lets a *focused but walked-away* console
+    // still receive its nudge: only genuine keyboard/mouse silence this long
+    // counts as abandoned. Active typing resets it every keystroke, and normal
+    // think-pauses while composing are far shorter, so a multi-minute compose
+    // never trips it.
+    private const uint AbandonedIdleMs = 180_000;
+
     // Submit timing. Injected text arrives as a keystroke burst, which the
     // recipient's editor coalesces as a paste; an Enter inside that window
     // becomes a literal newline, not a submit. Drain long enough to exit the
@@ -53,8 +69,15 @@ public static class PromptInjector
     /// call always produces exactly one submitted turn.
     ///
     /// Runs a throwaway child process so the caller's console is never disturbed.
+    ///
+    /// Unless <paramref name="force"/> is set, the helper declines to inject when
+    /// the target console is in the foreground (the operator is likely typing in
+    /// it): it returns false without disturbing that half-typed line, and the
+    /// caller is expected to retry later (auto-nudges retry via IpcManager's
+    /// periodic inbox rescan). Explicit operator actions (the `say` verb) pass
+    /// force=true to deliver immediately regardless.
     /// </summary>
-    public static bool Inject(int targetPid, string text, Action<string> log)
+    public static bool Inject(int targetPid, string text, Action<string> log, bool force = false)
     {
         if (targetPid <= 0)
         {
@@ -82,7 +105,7 @@ public static class PromptInjector
         var psi = new ProcessStartInfo
         {
             FileName = exePath,
-            Arguments = $"--inject {targetPid} {b64}",
+            Arguments = force ? $"--inject {targetPid} {b64} --force" : $"--inject {targetPid} {b64}",
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardError = true,
@@ -100,6 +123,13 @@ public static class PromptInjector
             {
                 try { child.Kill(); } catch { /* best effort */ }
                 log($"PromptInjector: helper timed out after {HELPER_TIMEOUT_MS}ms (PID {targetPid})");
+                return false;
+            }
+            if (child.ExitCode == HELD_EXIT)
+            {
+                // Operator is at the target console — held on purpose, not an
+                // error. Silent: the caller retries and the mail stays visibly
+                // in the inbox, so logging every poll would just be spam.
                 return false;
             }
             if (child.ExitCode != 0)
@@ -126,17 +156,21 @@ public static class PromptInjector
     /// exits. Does NOT try to restore any prior console — the child is
     /// exiting anyway, and the parent never had one clobbered.
     /// </summary>
-    public static bool InjectInProcess(int targetPid, string text, Action<string> log)
+    /// <returns>
+    /// Process exit code: 0 = delivered, <see cref="HELD_EXIT"/> = declined
+    /// because the operator is at the target console (retry later), 1 = failure.
+    /// </returns>
+    public static int InjectInProcess(int targetPid, string text, Action<string> log, bool force = false)
     {
         if (targetPid <= 0)
         {
             log($"PromptInjector: invalid PID {targetPid}");
-            return false;
+            return 1;
         }
         if (string.IsNullOrEmpty(text))
         {
             log("PromptInjector: empty text, skipping");
-            return false;
+            return 1;
         }
 
         // Detach from any console the OS handed the child (CreateNoWindow
@@ -147,7 +181,17 @@ public static class PromptInjector
         {
             var err = Marshal.GetLastWin32Error();
             log($"PromptInjector: AttachConsole({targetPid}) failed (win32 err={err})");
-            return false;
+            return 1;
+        }
+
+        // Hold if the operator is actively at this console — injecting now would
+        // land in their half-typed line and the submit Enter would fire it. Must
+        // run AFTER AttachConsole so GetConsoleWindow() resolves the *target's*
+        // console window. force=true (the `say` verb) bypasses the hold.
+        if (!force && OperatorBusy())
+        {
+            log($"PromptInjector: held — target console is foreground (operator active)");
+            return HELD_EXIT;
         }
 
         // AttachConsole does not modify the standard handles, so we must open
@@ -165,7 +209,7 @@ public static class PromptInjector
         {
             var err = Marshal.GetLastWin32Error();
             log($"PromptInjector: CreateFile(CONIN$) failed PID {targetPid} (win32 err={err})");
-            return false;
+            return 1;
         }
 
         try
@@ -179,7 +223,7 @@ public static class PromptInjector
             // pacing it gives ConPTY time to drain; sending Enter as its own
             // tiny call guarantees the submit always lands.
             var textRecords = BuildTextRecords(text);
-            if (!WriteAllChunked(hIn, textRecords, targetPid, log)) return false;
+            if (!WriteAllChunked(hIn, textRecords, targetPid, log)) return 1;
 
             // Pause long enough that the Enter arrives OUTSIDE the recipient's
             // paste-coalescing window. Claude Code's input layer treats a rapid
@@ -190,16 +234,16 @@ public static class PromptInjector
             Thread.Sleep(PasteWindowDrainMs);
 
             var enterRecords = BuildEnterRecords();
-            if (!WriteAllChunked(hIn, enterRecords, targetPid, log)) return false;
+            if (!WriteAllChunked(hIn, enterRecords, targetPid, log)) return 1;
 
             // Second-chance Enter: if the first was still coalesced into the
             // paste as a newline, this isolated keystroke submits the buffer;
             // if the first already submitted, this lands on an empty composer
             // and is a no-op. Idempotent either way.
             Thread.Sleep(SecondEnterDelayMs);
-            if (!WriteAllChunked(hIn, BuildEnterRecords(), targetPid, log)) return false;
+            if (!WriteAllChunked(hIn, BuildEnterRecords(), targetPid, log)) return 1;
 
-            return true;
+            return 0;
         }
         finally
         {
@@ -207,6 +251,27 @@ public static class PromptInjector
             // Intentionally do NOT FreeConsole or reattach to anything — the
             // child is about to exit and the OS will clean up.
         }
+    }
+
+    // True when the operator is actively at the target console: the console the
+    // child is attached to is the system foreground window AND there has been
+    // recent global keyboard/mouse input. Foreground-but-long-idle (walked away)
+    // is NOT busy, so a nudge left holding still lands once the console has sat
+    // untouched for AbandonedIdleMs. Called only from the child, after
+    // AttachConsole(target), so GetConsoleWindow() is the target's window.
+    private static bool OperatorBusy()
+    {
+        var console = GetConsoleWindow();
+        if (console == IntPtr.Zero) return false;      // no window — can't be typing at it
+        if (GetForegroundWindow() != console) return false; // target not focused — safe to inject
+        return GetIdleMilliseconds() < AbandonedIdleMs; // focused + recent input = actively used
+    }
+
+    private static uint GetIdleMilliseconds()
+    {
+        var lii = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>() };
+        if (!GetLastInputInfo(ref lii)) return 0; // unknown → treat as active (hold, don't stomp)
+        return unchecked(GetTickCount() - lii.dwTime);
     }
 
     // Write `records` to the console input handle. Splits into 256-record
@@ -331,6 +396,25 @@ public static class PromptInjector
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool AllocConsole();
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetConsoleWindow();
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetTickCount();
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LASTINPUTINFO
+    {
+        public uint cbSize;
+        public uint dwTime;
+    }
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr hObject);

@@ -518,7 +518,9 @@ public class ConsoleUI
         }
 
         var pid = instance.Process.Id;
-        if (PromptInjector.Inject(pid, text, Log))
+        // Explicit operator action — deliver even if that console is in the
+        // foreground (force bypasses the operator-busy hold used for auto-nudges).
+        if (PromptInjector.Inject(pid, text, Log, force: true))
             Log($"say → {instance.InstanceId} (PID {pid}): {text}");
         else
             Log($"say → {instance.InstanceId}: injection failed (see log above)");

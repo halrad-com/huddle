@@ -29,8 +29,11 @@ class Program
                 Console.Error.WriteLine($"--inject: bad base64 text: {ex.Message}");
                 return 2;
             }
-            var ok = PromptInjector.InjectInProcess(injectPid, injectText, m => Console.Error.WriteLine(m));
-            return ok ? 0 : 1;
+            var force = Array.IndexOf(args, "--force") >= 0;
+            // Exit code is meaningful: 0 delivered, HELD_EXIT (3) declined
+            // because the operator is at the console, 1 failure. The parent
+            // maps these back in PromptInjector.Inject.
+            return PromptInjector.InjectInProcess(injectPid, injectText, m => Console.Error.WriteLine(m), force);
         }
 
         // Find config path
