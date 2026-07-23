@@ -59,6 +59,14 @@ public class IpcManager : IDisposable
     private readonly Dictionary<string, FileSystemWatcher> _watchers = new();
     private readonly object _watchersLock = new();
 
+    // Mail files already announced to a session, keyed by safe path name. Mail now
+    // stays in inbox/ until the agent acknowledges it (inbox = unread), so without
+    // this every rescan, retry tick and huddle restart would re-announce the same
+    // unread mail. Persisted per session under ipc/<safe>/delivered.txt so a restart
+    // does not undo it. See MailReceipts.
+    private readonly ConcurrentDictionary<string, HashSet<string>> _delivered = new();
+    private readonly object _deliveredLock = new();
+
     // Per-path dedupe window — same idea as Orchestrator. Atomic writes
     // (temp + rename) fire Renamed *and* Changed for the same destination;
     // without this we'd process the same mail twice.
@@ -124,6 +132,46 @@ public class IpcManager : IDisposable
         Directory.CreateDirectory(inbox);
         Directory.CreateDirectory(outbox);
         return (inbox, outbox);
+    }
+
+    /// <summary>
+    /// Absolute path to a session's pending-context file — the queue of short
+    /// wake lines its Stop / UserPromptSubmit hook drains into the session as
+    /// context. This replaces synthesized-keystroke injection, so an operator
+    /// typing in the console is never stomped mid-prompt.
+    /// </summary>
+    public const string PendingFileName = "pending.txt";
+
+    public string PendingPath(string safePathName)
+        => Path.Combine(_ipcDir, safePathName, PendingFileName);
+
+    /// <summary>
+    /// Append one wake line to a session's pending-context file. The session's
+    /// hook claims and clears this file on its own turn boundary (Stop) or on
+    /// the operator's next submit (UserPromptSubmit), so mail arrives as pulled
+    /// context instead of pushed keystrokes. Newlines are collapsed so one call
+    /// is always exactly one line. Retries briefly if the hook is mid-drain.
+    /// </summary>
+    public void AppendPending(string safePathName, string line)
+    {
+        if (string.IsNullOrEmpty(safePathName) || string.IsNullOrEmpty(line)) return;
+        line = line.Replace("\r\n", " ").Replace("\r", " ").Replace("\n", " ");
+        var path = PendingPath(safePathName);
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.AppendAllText(path, line + "\n");
+                return;
+            }
+            catch (IOException)
+            {
+                // Hook may be mid-drain (renaming the file). Brief backoff + retry.
+                Thread.Sleep(20);
+            }
+        }
+        _log($"IPC: could not append pending wake line for {safePathName} (file busy)");
     }
 
     /// <summary>
@@ -224,12 +272,11 @@ public class IpcManager : IDisposable
         }
     }
 
-    // Periodic re-drive of undelivered mail. Runs every RetryInterval. For each
-    // watched inbox, re-processes pending files older than RetryMinAge (fresh
-    // ones belong to the FSW). Delivered mail was moved to processed/, so only
-    // genuinely-undelivered files remain — chiefly nudges held because the
-    // operator was at the recipient's console. Quiet: no per-file log spam;
-    // the visible signal is the mail leaving the inbox when it finally lands.
+    // Periodic re-drive of undelivered mail, and cleanup of mail the agent has
+    // acknowledged. Runs every RetryInterval. Announced mail is skipped by the
+    // delivered index, so only genuinely-undelivered files are re-driven — chiefly
+    // nudges held because the operator was at the recipient's console. Quiet: no
+    // per-file log spam.
     private void RetryTick(object? state)
     {
         if (Interlocked.Exchange(ref _retryRunning, 1) == 1) return; // a tick is still running
@@ -238,6 +285,10 @@ public class IpcManager : IDisposable
             var cutoff = DateTime.UtcNow - RetryMinAge;
             foreach (var kv in _watchedInstances)
             {
+                // Clear anything the agent has acknowledged since the last tick, so
+                // the inbox reflects what is genuinely still unread.
+                ReapAcknowledged(kv.Key);
+
                 var inbox = Path.Combine(_ipcDir, kv.Key, "inbox");
                 string[] files;
                 try { files = Directory.GetFiles(inbox, "*.json"); }
@@ -258,13 +309,18 @@ public class IpcManager : IDisposable
     }
 
     // Read, log, and dispatch a single mail file. Shared by FSW events and by
-    // Watch() catch-up scans. On a successful nudge the file is auto-archived to
-    // processed/ (I003) and the wake signal points there, so even a Write-only
-    // persona never has to clear its own inbox and a reload can't re-fire it. A
-    // failed delivery leaves the file in inbox/ to retry on the next scan / start.
+    // Watch() catch-up scans. The mail STAYS in inbox/ once announced, so inbox/
+    // means "not read yet" — the agent moves it to processed/ when done, or a
+    // Write-only persona copies it there and huddle clears the original (see
+    // ReapAcknowledged). Announcing is recorded in the delivered index so rescans,
+    // retry ticks and restarts never re-fire a wake line for the same message. A
+    // failed delivery records nothing and is retried on the next scan / start.
     private void ProcessInboxFile(string instanceId, string fullPath, string name, bool quiet = false)
     {
         if (!File.Exists(fullPath)) return;
+
+        var safe = SafeNameFor(fullPath);
+        if (safe.Length > 0 && AlreadyAnnounced(safe, name)) return;
 
         string json;
         try { json = File.ReadAllText(fullPath); }
@@ -305,31 +361,20 @@ public class IpcManager : IDisposable
             return;
         }
 
-        // Auto-archive (I003): nudge the recipient with the mail's FUTURE processed/ path,
-        // then move it there only on a successful nudge. A delivered message ends up in
-        // processed/ (a Write-only persona never clears its own inbox; a reload can't
-        // re-fire it). A failed delivery leaves the file untouched in inbox/ — retried on
-        // the next scan / session start, and generating no spurious watcher event.
-        var destPath = ComputeProcessedDest(fullPath, name);
-
+        // Point the wake line at the mail where it actually is — inbox/ — and leave
+        // it there. The agent clears it when it has read it, which is what makes
+        // inbox/ a truthful unread list rather than a delivery artefact.
         bool delivered = false;
         try
         {
             if (MessageReceived != null)
-                delivered = MessageReceived.Invoke(instanceId, msg, destPath);
+                delivered = MessageReceived.Invoke(instanceId, msg, fullPath);
         }
         catch (Exception ex) { _log($"IPC: MessageReceived handler threw: {ex.Message}"); }
 
-        if (delivered)
-        {
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
-                File.Move(fullPath, destPath);
-            }
-            catch (Exception ex) { _log($"IPC: delivered but failed to archive {name}: {ex.Message}"); }
-        }
-        // Not delivered: leave the file in inbox/ — retried on the next scan / session start.
+        if (delivered && safe.Length > 0)
+            MarkAnnounced(safe, name);
+        // Not delivered: nothing recorded — retried on the next scan / session start.
     }
 
     // One shared entry point for reading agent-authored IPC JSON: strict parse,
@@ -424,6 +469,171 @@ public class IpcManager : IDisposable
         if (!json.TrimEnd().EndsWith("}")) return false;
         try { return (DateTime.UtcNow - File.GetLastWriteTimeUtc(fullPath)) >= TimeSpan.FromSeconds(2); }
         catch { return false; }
+    }
+
+    // ---- read receipts -------------------------------------------------------
+    // Mail stays in inbox/ until the recipient acknowledges it, so inbox/ answers
+    // "what has this agent not read yet". Huddle tracks what it has announced
+    // (delivered index) and clears inbox originals once the agent has copied them
+    // into processed/. See MailReceipts for the rules.
+
+    private string DeliveredIndexPath(string safe) =>
+        Path.Combine(_ipcDir, safe, MailReceipts.DeliveredIndexName);
+
+    // The safe path name owning a mail file: ipc/<safe>/inbox/<file>.
+    private static string SafeNameFor(string inboxFilePath)
+    {
+        var inboxDir = Path.GetDirectoryName(inboxFilePath);
+        var sessionDir = inboxDir == null ? null : Path.GetDirectoryName(inboxDir);
+        return sessionDir == null ? "" : Path.GetFileName(sessionDir);
+    }
+
+    private HashSet<string> DeliveredFor(string safe)
+    {
+        return _delivered.GetOrAdd(safe, s =>
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var path = DeliveredIndexPath(s);
+                if (File.Exists(path))
+                    foreach (var line in File.ReadAllLines(path))
+                        if (!string.IsNullOrWhiteSpace(line)) set.Add(line.Trim());
+            }
+            catch (Exception ex) { _log($"IPC: could not read delivered index for '{s}': {ex.Message}"); }
+            return set;
+        });
+    }
+
+    private bool AlreadyAnnounced(string safe, string name)
+    {
+        var set = DeliveredFor(safe);
+        lock (_deliveredLock) return set.Contains(name);
+    }
+
+    private void MarkAnnounced(string safe, string name)
+    {
+        var set = DeliveredFor(safe);
+        lock (_deliveredLock)
+        {
+            if (!set.Add(name)) return;
+            try { File.AppendAllText(DeliveredIndexPath(safe), name + Environment.NewLine); }
+            catch (Exception ex) { _log($"IPC: could not record delivery of {name}: {ex.Message}"); }
+        }
+    }
+
+    private void ForgetAnnounced(string safe, IEnumerable<string> names)
+    {
+        var set = DeliveredFor(safe);
+        lock (_deliveredLock)
+        {
+            var changed = false;
+            foreach (var n in names) changed |= set.Remove(n);
+            if (!changed) return;
+            try { File.WriteAllLines(DeliveredIndexPath(safe), set.OrderBy(n => n)); }
+            catch (Exception ex) { _log($"IPC: could not rewrite delivered index for '{safe}': {ex.Message}"); }
+        }
+    }
+
+    /// <summary>
+    /// Clear inbox originals the agent has acknowledged by copying into processed/,
+    /// and prune index entries for mail that has left the inbox. An agent that moves
+    /// its own mail (shell personas) needs nothing here; this covers the Write-only
+    /// ones that can create the processed/ copy but not delete the original.
+    ///
+    /// Driven by the retry tick, and by <see cref="GetBacklog"/> so the operator's
+    /// unread counts are current rather than up to one tick stale.
+    /// </summary>
+    public void ReapAcknowledged(string safe)
+    {
+        try
+        {
+            var sessionDir = Path.Combine(_ipcDir, safe);
+            var inboxDir = Path.Combine(sessionDir, "inbox");
+            var processedDir = Path.Combine(sessionDir, "processed");
+            if (!Directory.Exists(inboxDir)) return;
+
+            var inboxNames = Directory.GetFiles(inboxDir, "*.json").Select(Path.GetFileName).OfType<string>();
+            var processedNames = Directory.Exists(processedDir)
+                ? Directory.GetFiles(processedDir, "*.json").Select(Path.GetFileName).OfType<string>()
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            List<string> delivered;
+            var set = DeliveredFor(safe);
+            lock (_deliveredLock) delivered = set.ToList();
+
+            var (reap, forget) = MailReceipts.PlanCleanup(inboxNames, processedNames, delivered);
+
+            foreach (var name in reap)
+            {
+                try { File.Delete(Path.Combine(inboxDir, name)); }
+                catch (Exception ex) { _log($"IPC: could not clear acknowledged {name}: {ex.Message}"); }
+            }
+            if (reap.Count > 0)
+                _log($"IPC: {reap.Count} message(s) acknowledged by '{safe}' — cleared from inbox");
+
+            if (forget.Count > 0) ForgetAnnounced(safe, forget);
+        }
+        catch (Exception ex) { _log($"IPC: receipt cleanup failed for '{safe}': {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Per-session mail backlog: wake lines queued but not yet shown, and mail
+    /// delivered but not yet acknowledged. Sessions with nothing outstanding are
+    /// omitted. Ordered by unread, then queued, descending.
+    /// </summary>
+    public List<MailBacklog> GetBacklog()
+    {
+        var rows = new List<MailBacklog>();
+        if (!Directory.Exists(_ipcDir)) return rows;
+
+        foreach (var sessionDir in Directory.GetDirectories(_ipcDir))
+        {
+            var name = Path.GetFileName(sessionDir);
+            if (name.StartsWith('_')) continue;          // orchestrator dirs, not a session inbox
+
+            // Settle acknowledgements first so the counts below are current.
+            ReapAcknowledged(name);
+
+            var queued = 0;
+            DateTime? oldest = null;
+            try
+            {
+                var pending = Path.Combine(sessionDir, PendingFileName);
+                if (File.Exists(pending))
+                {
+                    queued = File.ReadAllLines(pending).Count(l => !string.IsNullOrWhiteSpace(l));
+                    if (queued > 0) oldest = File.GetLastWriteTime(pending);
+                }
+            }
+            catch { /* a drain may be in flight; report what we can */ }
+
+            var unread = 0;
+            try
+            {
+                var inbox = Path.Combine(sessionDir, "inbox");
+                if (Directory.Exists(inbox))
+                {
+                    var files = Directory.GetFiles(inbox, "*.json");
+                    unread = files.Length;
+                    foreach (var f in files)
+                    {
+                        var written = File.GetLastWriteTime(f);
+                        if (oldest == null || written < oldest) oldest = written;
+                    }
+                }
+            }
+            catch { /* ditto */ }
+
+            if (queued > 0 || unread > 0)
+                rows.Add(new MailBacklog(name, queued, unread, oldest));
+        }
+
+        return rows
+            .OrderByDescending(r => r.Unread)
+            .ThenByDescending(r => r.Queued)
+            .ToList();
     }
 
     // Compute where a mail file will live once archived (sibling processed/ dir), giving a

@@ -644,9 +644,10 @@ public class Orchestrator : IDisposable
                     continue;
                 }
 
-                var pid = inst.Process?.Id ?? 0;
-                if (pid > 0 && PromptInjector.Inject(pid, nudge, _log))
-                    injected++;
+                // Pending-context delivery (drained by the session's hook) rather
+                // than keystroke injection — never stomps an operator's prompt.
+                _ipc.AppendPending(inst.SafePathName, nudge);
+                injected++;
             }
 
             _log($"Orchestrator: broadcast '{subject}' from {msg.From} — delivered={delivered} injected={injected} skipped={skipped}");
@@ -1121,9 +1122,9 @@ public class Orchestrator : IDisposable
 
         if (inst == null || !inst.IsAlive) return;
 
-        var pid = inst.Process?.Id ?? 0;
-        if (pid > 0)
-            PromptInjector.Inject(pid, text, _log);
+        // Pending-context delivery (drained by the session's hook) rather than
+        // keystroke injection — never stomps an operator's in-progress prompt.
+        _ipc.AppendPending(inst.SafePathName, text);
     }
 
     public void Dispose()

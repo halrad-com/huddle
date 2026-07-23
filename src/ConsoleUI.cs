@@ -144,31 +144,12 @@ public class ConsoleUI
                         Console.Write($"  [{instance.ActivePersona}]");
                     }
 
-                    // Surface whether a running session has a console window or is headless.
-                    if (instance.Status == SessionStatus.Running)
-                    {
-                        var headless = IsHeadless(instance);
-                        Console.ForegroundColor = headless ? ConsoleColor.Yellow : ConsoleColor.DarkGray;
-                        Console.Write(headless ? "  headless" : "  windowed");
-                    }
-
                     Console.WriteLine();
                 }
                 finally { Console.ResetColor(); }
             }
         }
         Console.WriteLine();
-    }
-
-    // A running session is "headless" when its process has no top-level window handle
-    // (no console window). MainWindowHandle is also briefly zero right after spawn, before
-    // the console is created, so a just-started session can read headless for a moment.
-    private static bool IsHeadless(SessionInstance instance)
-    {
-        var proc = instance.Process;
-        if (proc == null) return false;
-        try { proc.Refresh(); return proc.MainWindowHandle == IntPtr.Zero; }
-        catch { return false; }
     }
 
     public void PrintHelp()
@@ -196,6 +177,7 @@ public class ConsoleUI
             Console.WriteLine("  resume <instance>        Open 'claude --resume <session-id>' for a session in its repo root");
             Console.WriteLine("  progress                 Show last checkpoint per session");
             Console.WriteLine("  conflicts                Report file claim overlaps across sessions");
+            Console.WriteLine("  backlog                  Show undelivered/unread mail per session (alias: unread)");
             Console.WriteLine("  janitor                  Report leaked session resources (resledger, B016)");
             Console.WriteLine("  queue                    Show the work queue — active / queued (blocked on) / done / failed");
             Console.WriteLine("  replay <repo> [host[:port]]  Run the repo's captured regression tests; optional cross-box DUT target");
@@ -433,6 +415,10 @@ public class ConsoleUI
 
             case "janitor":
                 HandleJanitor();
+                break;
+
+            case "backlog" or "unread":
+                HandleBacklog();
                 break;
 
             case "focus" or "goto":
@@ -1486,13 +1472,14 @@ public class ConsoleUI
             return;
         }
 
-        // Process.MainWindowHandle is populated once the spawned cmd.exe creates
-        // its console window. Refresh() is needed in case we cached an old value.
-        instance.Process.Refresh();
-        var hWnd = instance.Process.MainWindowHandle;
-        if (hWnd == IntPtr.Zero)
+        // The handle is captured at spawn (SessionWindow) rather than read from
+        // Process.MainWindowHandle, which is always zero for a console process —
+        // the window belongs to the console host, not to cmd.exe or claude.
+        var hWnd = instance.WindowHandle;
+        if (!SessionWindow.IsLive(hWnd))
         {
-            Log($"{instance.InstanceId} has no window handle (headless or not yet created).");
+            Log($"{instance.InstanceId} has no console window on record. " +
+                "Sessions recovered after a huddle restart lose it — restart the session to focus it.");
             return;
         }
 
@@ -1557,6 +1544,58 @@ public class ConsoleUI
     // B016: report uncleaned entries from ipc/resledger/ whose pid is still
     // alive. Report-only — reclaim goes through scripts/sweep-orphans.ps1 -Kill
     // or the reclaimResourcesOnStop config opt-in.
+    /// <summary>
+    /// Show what each session still owes attention to: wake lines queued but not yet
+    /// shown, and mail delivered but not yet acknowledged. Since mail stays in inbox/
+    /// until the agent clears it, "unread" is a real count and not a delivery artefact.
+    /// </summary>
+    private void HandleBacklog()
+    {
+        if (Ipc == null)
+        {
+            Log("IPC is disabled. Enable 'ipc' in huddle.json.");
+            return;
+        }
+
+        var rows = Ipc.GetBacklog();
+        if (rows.Count == 0)
+        {
+            Log("No mail outstanding — every session is caught up.");
+            return;
+        }
+
+        Console.WriteLine();
+        try
+        {
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"{"session",-28} {"unread",6} {"queued",6}  oldest");
+            Console.WriteLine(new string('-', 64));
+            Console.ResetColor();
+
+            foreach (var row in rows)
+            {
+                var running = _manager.Instances.Values.Any(i =>
+                    i.SafePathName.Equals(row.Session, StringComparison.OrdinalIgnoreCase) && i.IsAlive);
+
+                // Unread mail for a live session is the one that needs a human: it was
+                // announced and the agent has not cleared it. A stopped session's
+                // backlog drains by itself the moment it starts.
+                Console.ForegroundColor = row.Unread > 0 && running ? ConsoleColor.Yellow : ConsoleColor.Gray;
+                var age = row.Oldest.HasValue ? row.Oldest.Value.ToString("MM-dd HH:mm") : "";
+                Console.Write($"{row.Session,-28} {row.Unread,6} {row.Queued,6}  {age}");
+
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.WriteLine(running ? "" : "  (stopped — drains on start)");
+            }
+        }
+        finally { Console.ResetColor(); }
+
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.WriteLine("\nunread = delivered, not yet cleared by the agent   queued = wake lines not yet shown");
+        Console.ResetColor();
+        Console.WriteLine();
+    }
+
     private void HandleJanitor()
     {
         if (Ipc == null)

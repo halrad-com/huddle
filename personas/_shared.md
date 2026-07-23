@@ -43,6 +43,8 @@ Sessions run under a *gated* command allowlist — no unfettered access, but sim
 
 2. **Keep every Bash call single-purpose and allowlist-shaped.** One command (`git status`, `dotnet build src/foo.csproj`). Do **not** stitch steps with `;`, `&&`, or pipes, and do **not** pipe into an interpreter (`python -c`, `sed -i`, `awk '{...}'`) to save a round-trip. A compound command matches no allowlist pattern, so it prompts every time — and a headless session then hangs waiting for a human. Two simple calls cost a little more; a hang costs the whole task.
 
+3. **Never `cd <dir> && …` to reach another directory.** It is a compound command (so it prompts), and `cd`-ing into a directory before running git can execute untrusted hooks from that directory — an extra security prompt every single time. Use a directory flag or absolute paths instead: `git -C <dir> status`, `git -C <dir> add <file>`, `dotnet build <dir>/foo.csproj`. `git -C …` matches the existing `git:*` allow and never prompts.
+
 Interpreters (`python -c`, `node -e`, `pwsh -Command`) run arbitrary code and are **not** auto-allowed — they prompt. If you're reaching for one to parse or transform text, use Read/Grep/Glob, or write a small named script file and run that instead.
 
 ## Standard Project Terminology
@@ -188,7 +190,15 @@ The wake line is a signal, NOT the message. The actual mail — the full body, t
 2. Read the file (`ipc/<self>/inbox/<filename>.json`) — the `body` field is what the sender wrote, and may be JSON, text, or a structured object.
 3. Act on the mail. If the sender asked you to do work, do it.
 4. **Reply by writing mail back**, not by typing prose into your prompt. Write a new JSON file into the sender's inbox (`ipc/<their-safe-name>/inbox/<your-unique-filename>.json`) using the same shape as the mail you received. The orchestrator nudges them the same way.
-5. Move the file you just handled to `ipc/<self>/processed/` so your inbox stays clean and you can see what's outstanding at a glance.
+5. **Clear the mail you just handled — this is a read receipt, not housekeeping.** Mail
+   stays in `ipc/<self>/inbox/` until you clear it, so your inbox *is* the list of what
+   you have not read. The operator reads it that way (`backlog` in the huddle console),
+   so an inbox you never clear reports you as behind whether you are or not.
+
+   Move the file to `ipc/<self>/processed/` (`git mv`-style move, or a shell `move`). If
+   you have no shell, **write a copy** of the file into `ipc/<self>/processed/` with the
+   same filename — huddle sees the copy and removes the inbox original for you. Either
+   way the receipt is the file appearing in `processed/`.
 
 **Write VALID JSON.** The #1 mail defect is an unescaped backslash in a string value —
 Windows paths (`C:\Users\...`, `X:\Library`) and regex (`(\d)`) are invalid JSON escapes

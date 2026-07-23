@@ -202,15 +202,20 @@ class Program
                 if (pid <= 0) return false;
 
                 // Make the path relative to the huddle root so the nudge stays short
-                // and the agent can read it as-is. Derive it from the ACTUAL file path
-                // (which is processed/<file> after auto-archive, or inbox/<file> if the
-                // archive move failed) rather than hardcoding inbox/.
+                // and the agent can read it as-is. The mail stays in inbox/ until the
+                // agent acknowledges it, so this points there.
                 var relPath = Path.GetRelativePath(configDir, filePath).Replace('\\', '/');
 
                 var subject = (msg.Subject ?? "").Replace("\r\n", " ").Replace("\r", " ").Replace("\n", " ");
                 var nudge = $"[huddle mail from {msg.From}] {subject} — read {relPath}";
 
-                return PromptInjector.Inject(pid, nudge, ConsoleUI.Log);
+                // Deliver the wake line as pulled context via the session's
+                // pending-context file (drained by its Stop/UserPromptSubmit hook)
+                // instead of synthesized keystrokes — an operator typing in the
+                // console is never stomped. Returning true records the announcement
+                // so it is never repeated; clearing the inbox is the agent's job.
+                ipcManager.AppendPending(inst.SafePathName, nudge);
+                return true;
             };
         }
 

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 
 namespace Huddle;
 
@@ -31,6 +32,90 @@ public class SessionManager
         _personasDir = personasDir;
         _contextPath = contextPath;
         _log = log;
+    }
+
+    // The mail-delivery hook script. Runs on Stop (session finished a turn) and
+    // UserPromptSubmit (operator submitted). It atomically claims the session's
+    // pending-context file and emits its lines back to Claude: on Stop as a
+    // decision:block reason (waking a new turn to process the mail), on submit as
+    // additionalContext (folded onto the operator's own prompt). Draining the
+    // file each time makes it self-terminating — no stop_hook_active loop.
+    // ASCII-only (PowerShell 5.1 chokes on non-ASCII in .ps1).
+    private const string MailHookScript = @"# huddle mail-delivery hook - written by huddle SessionManager; do not edit.
+$ErrorActionPreference = 'SilentlyContinue'
+# Read the pending file as UTF-8 and answer in UTF-8: PS 5.1 defaults both to the
+# console codepage, which mangles the non-ASCII characters in wake lines.
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$raw = [Console]::In.ReadToEnd()
+$in = $null
+try { $in = $raw | ConvertFrom-Json } catch { }
+$evt = ''
+if ($in) { $evt = [string]$in.hook_event_name }
+
+$pending = $env:HUDDLE_PENDING
+if ($pending) { $pending = $pending.Trim() }
+if (-not $pending) { exit 0 }
+$claim = ""$pending.draining""
+
+# Claim atomically: absorb any orphaned claim from a crashed prior drain, then
+# rename the live file aside so a concurrent huddle append lands in a fresh one.
+$content = ''
+if (Test-Path -LiteralPath $claim) {
+    $content += (Get-Content -LiteralPath $claim -Raw -Encoding UTF8)
+    Remove-Item -LiteralPath $claim -Force
+}
+if (Test-Path -LiteralPath $pending) {
+    try {
+        Move-Item -LiteralPath $pending -Destination $claim -Force
+        $content += (Get-Content -LiteralPath $claim -Raw -Encoding UTF8)
+        Remove-Item -LiteralPath $claim -Force
+    } catch { }
+}
+
+if (-not $content) { exit 0 }
+$content = $content.TrimEnd()
+if ($content.Length -eq 0) { exit 0 }
+
+if ($evt -eq 'Stop') {
+    $out = @{ decision = 'block'; reason = $content }
+} else {
+    $out = @{ hookSpecificOutput = @{ hookEventName = $evt; additionalContext = $content } }
+}
+$out | ConvertTo-Json -Compress -Depth 5
+exit 0
+";
+
+    // Write the mail hook script under <configDir>\hooks (idempotent overwrite,
+    // so it always matches this huddle build). Returns the absolute script path.
+    private string WriteMailHookScript(string configDir)
+    {
+        var hooksDir = Path.Combine(configDir, "hooks");
+        Directory.CreateDirectory(hooksDir);
+        var scriptPath = Path.Combine(hooksDir, "huddle-mail-hook.ps1");
+        File.WriteAllText(scriptPath, MailHookScript);
+        return scriptPath;
+    }
+
+    // Write a per-session settings file wiring both hooks to the script. Scoped
+    // via `--settings <file>`; nothing global is touched. JsonSerializer handles
+    // escaping the Windows path inside the command string.
+    private static void WriteMailHookSettings(string settingsFile, string scriptPath)
+    {
+        var command = $"powershell -NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"";
+        var hookEntry = new[]
+        {
+            new { matcher = "", hooks = new[] { new { type = "command", command } } }
+        };
+        var settings = new
+        {
+            hooks = new Dictionary<string, object>
+            {
+                ["Stop"] = hookEntry,
+                ["UserPromptSubmit"] = hookEntry,
+            }
+        };
+        File.WriteAllText(settingsFile,
+            JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
     }
 
     // Escape a string for use as a double-quoted argument on a cmd.exe /c line.
@@ -395,15 +480,50 @@ public class SessionManager
             if (!string.IsNullOrEmpty(prompt))
                 claudeArgs += $" \"{EscapeForCmdQuoted(prompt)}\"";
 
+            // Mail-delivery hooks. Instead of typing wake lines into this console
+            // (which stomped an operator's in-progress prompt), huddle appends them
+            // to a per-session pending-context file; a Stop hook drains it into a
+            // fresh turn when the session goes idle, and a UserPromptSubmit hook
+            // folds any pending lines onto the operator's own next submit. Both are
+            // scoped to this session via `--settings <file>` — nothing global is
+            // touched. HUDDLE_PENDING tells the hook which file to drain.
+            var hookPendingSet = "";
+            if (Ipc != null)
+            {
+                try
+                {
+                    var configDir = Directory.GetParent(Ipc.IpcDir)!.FullName;
+                    var scriptPath = WriteMailHookScript(configDir);
+                    var settingsFile = Path.Combine(sessionLogDir, $"{instance.SafePathName}-hooks.json");
+                    WriteMailHookSettings(settingsFile, scriptPath);
+                    claudeArgs += $" --settings \"{settingsFile}\"";
+                    // Quote the whole assignment: `set VAR=value && ...` captures
+                    // everything up to the `&&`, trailing space included, and the
+                    // hook's -LiteralPath lookups do not trim. The quotes are not
+                    // part of the value.
+                    hookPendingSet = $"set \"HUDDLE_PENDING={Ipc.PendingPath(instance.SafePathName)}\" && ";
+                }
+                catch (Exception ex)
+                {
+                    // Non-fatal: without hooks the session simply won't auto-receive
+                    // mail as context (it can still read its inbox on demand).
+                    _log($"[{instance.InstanceId}] mail hook setup failed (continuing without): {ex.Message}");
+                }
+            }
+
             // Env vars exported to the child Claude Code process:
             //   BUN_CRASH_REPORTER_URL — silenced so Bun crash dialogs stay inside this session
             //   CLAUDE_SESSION_LABEL  — literal statusline label (used by ~/.claude/statusline.ps1)
             //   CLAUDE_PERSONA        — persona name, for scripts/tools inside the session
             // The leading `title` makes the console window identifiable in Alt+Tab
-            // and Task Manager, and is what the `focus` verb matches on.
+            // and Task Manager, and lets the spawn-time window capture tell this
+            // session's window from those of sessions started alongside it. Claude
+            // Code replaces the title with the conversation topic once it is up, so
+            // it is a launch-time discriminator only — see SessionWindow.
             var envPrefix = $"title huddle: {instanceId} && " +
                             "set BUN_CRASH_REPORTER_URL= && " +
-                            $"set CLAUDE_SESSION_LABEL={instanceId} && ";
+                            $"set CLAUDE_SESSION_LABEL={instanceId} && " +
+                            hookPendingSet;
             if (!string.IsNullOrEmpty(persona))
                 envPrefix += $"set CLAUDE_PERSONA={persona} && ";
 
@@ -419,6 +539,11 @@ public class SessionManager
             {
                 instance.Status = SessionStatus.Starting;
                 instance.ActivePersona = persona;
+
+                // Snapshot the desktop before launching so the session's own console
+                // window can be told apart from the ones already open.
+                var windowsBefore = SessionWindow.Snapshot();
+
                 var process = Process.Start(psi);
                 if (process == null)
                 {
@@ -440,6 +565,10 @@ public class SessionManager
                 // Monitor in background
                 var proc = process;
                 _ = Task.Run(() => MonitorProcess(instance, proc, sessionLogDir));
+
+                // Find this session's console window in the background: the host takes
+                // a moment to create it, and nothing here should block the spawn.
+                _ = Task.Run(() => CaptureWindow(instance, windowsBefore));
 
                 started = true;
                 return true;
@@ -597,6 +726,9 @@ public class SessionManager
             try { instance.LastExitCode = proc?.ExitCode; } catch { }
             _log($"Stopped '{instance.InstanceId}' (exit code {instance.LastExitCode}).");
 
+            // Release the window so a concurrent spawn can claim it if Windows
+            // recycles the handle.
+            instance.WindowHandle = IntPtr.Zero;
             instance.Process = null;
             proc?.Dispose();
 
@@ -836,6 +968,56 @@ public class SessionManager
     {
         return _instances.Values
             .Where(i => i.RepoName.Equals(repoName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    // How long to wait for a spawned session's console window to appear. Windows
+    // Terminal is typically up well inside a second; the ceiling only matters on a
+    // loaded box. Claude Code replaces the title with the conversation topic after
+    // it starts, so a slow capture loses the title match and falls back to the
+    // new-window rule.
+    private static readonly TimeSpan WindowCaptureTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan WindowCapturePoll = TimeSpan.FromMilliseconds(150);
+
+    /// <summary>
+    /// Locate and remember the console window of a session that has just started,
+    /// so `focus` can raise it. Best-effort: a session without a captured window is
+    /// fully functional, it just cannot be brought to the front.
+    /// </summary>
+    private void CaptureWindow(SessionInstance instance, IReadOnlySet<IntPtr> windowsBefore)
+    {
+        try
+        {
+            var hWnd = SessionWindow.WaitForWindow(
+                windowsBefore,
+                SessionWindow.TitleMarker(instance.InstanceId),
+                ClaimedWindowHandles,
+                WindowCaptureTimeout,
+                WindowCapturePoll);
+
+            if (hWnd == IntPtr.Zero)
+            {
+                _log($"[{instance.InstanceId}] no console window found to focus (session is unaffected).");
+                return;
+            }
+
+            lock (instance.Lock) instance.WindowHandle = hWnd;
+        }
+        catch (Exception ex)
+        {
+            _log($"[{instance.InstanceId}] window capture failed (continuing without): {ex.Message}");
+        }
+    }
+
+    /// <summary>Window handles already owned by a session, so two concurrent spawns cannot claim one window.</summary>
+    private IReadOnlySet<IntPtr> ClaimedWindowHandles()
+    {
+        var claimed = new HashSet<IntPtr>();
+        foreach (var (_, other) in Instances)
+        {
+            var handle = other.WindowHandle;
+            if (handle != IntPtr.Zero) claimed.Add(handle);
+        }
+        return claimed;
     }
 
     private void MonitorProcess(SessionInstance instance, Process proc, string logDir)

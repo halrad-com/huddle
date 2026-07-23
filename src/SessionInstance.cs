@@ -30,6 +30,11 @@ public class SessionInstance
     public DateTime? AutoRestartAt { get; set; }
     public string? ActivePersona { get; set; }
     public Guid? SessionId { get; set; }
+
+    // Console window handle, captured at spawn (see SessionWindow). Not persisted:
+    // handles do not survive a huddle restart, so sessions recovered from state.json
+    // have none and cannot be focused until they are restarted.
+    public IntPtr WindowHandle { get; set; } = IntPtr.Zero;
     public List<string> PersonaTempFiles { get; } = new();
     public PersonaConfig? PersonaConfig { get; set; }
 
