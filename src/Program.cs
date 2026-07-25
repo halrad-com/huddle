@@ -36,6 +36,17 @@ class Program
             return PromptInjector.InjectInProcess(injectPid, injectText, m => Console.Error.WriteLine(m), force);
         }
 
+        // Credential-logger mode. Each spawned session's git is configured to run
+        // `huddle --cred-log <instanceId> <dropDir>` as a credential helper BEFORE
+        // GCM (see SessionManager / GitActivityMonitor.WriteCredentialLoggerConfig).
+        // git appends the operation as the final arg. We record the requested host
+        // to a drop file and output nothing, so GCM still performs the real auth —
+        // this lets huddle announce which session is blocked on a credential prompt.
+        if (args.Length >= 2 && args[0] == "--cred-log")
+        {
+            return GitActivityMonitor.RunCredLog(args);
+        }
+
         // Find config path
         var configPath = "huddle.json";
         for (int i = 0; i < args.Length - 1; i++)
@@ -48,10 +59,10 @@ class Program
         }
 
         // Fallback to old config name
-        if (!File.Exists(configPath) && configPath == "huddle.json" && File.Exists("seatbelt.json"))
+        if (!File.Exists(configPath) && configPath == "huddle.json" && File.Exists("myapp.json"))
         {
-            configPath = "seatbelt.json";
-            ConsoleUI.Log("Note: rename seatbelt.json to huddle.json");
+            configPath = "myapp.json";
+            ConsoleUI.Log("Note: rename myapp.json to huddle.json");
         }
 
         // First-run bootstrap: copy template.json -> huddle.json so a fresh
@@ -272,6 +283,13 @@ class Program
         contextWriter?.Update(manager.Instances);
         SessionState.Save(stateFile, manager.Instances);
 
+        // Git activity monitor: surface pushes/fetches (remote-tracking reflog) and
+        // credential-prompt requests (auth drop dir) in the console. Poll-based.
+        var gitAuthDir = ipcManager?.GitAuthDir ?? Path.Combine(dataDir, "gitauth");
+        var gitActivity = new GitActivityMonitor(
+            config.Sessions.Select(s => (s.Name, s.Root)), gitAuthDir, ConsoleUI.Log);
+        gitActivity.Start();
+
         // Print initial status
         ui.PrintStatus();
         ui.PrintPersonas(manager.GetAvailablePersonas());
@@ -366,6 +384,7 @@ class Program
                 ConsoleUI.Log($"Detaching. {running} session(s) still running.");
             }
         }
+        gitActivity.Dispose();
         orchestrator?.Dispose();
         ipcManager?.Dispose();
         ConsoleUI.Log("Goodbye.");

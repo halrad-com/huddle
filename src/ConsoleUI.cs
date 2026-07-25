@@ -92,6 +92,9 @@ public class ConsoleUI
         }
 
         // Group instances by repo for display
+        var projectsRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "projects");
+
         var grouped = _manager.Instances.Values
             .GroupBy(i => i.RepoName, StringComparer.OrdinalIgnoreCase)
             .OrderBy(g => g.Key);
@@ -142,6 +145,30 @@ public class ConsoleUI
                     {
                         Console.ForegroundColor = ConsoleColor.Magenta;
                         Console.Write($"  [{instance.ActivePersona}]");
+                    }
+
+                    // Reflect agent trouble from the session's transcript: a current
+                    // API error (500/529/rate-limit) is called out in red; otherwise a
+                    // long idle gap (transcript not growing) is noted plainly — it can't
+                    // tell "stuck" from "waiting at the prompt", so it isn't an alarm.
+                    if (instance.Status == SessionStatus.Running && instance.SessionId is Guid sid)
+                    {
+                        var tpath = SessionTrouble.TranscriptPath(projectsRoot, instance.Root, sid);
+                        if (tpath != null)
+                        {
+                            var reason = SessionTrouble.ApiErrorReason(tpath);
+                            if (reason != null)
+                            {
+                                Console.ForegroundColor = ConsoleColor.Red;
+                                Console.Write($"  [!] API: {reason}");
+                            }
+                            else if (SessionTrouble.LastActivity(tpath) is { } la
+                                     && DateTime.Now - la > TimeSpan.FromMinutes(3))
+                            {
+                                Console.ForegroundColor = ConsoleColor.DarkGray;
+                                Console.Write($"  idle {(int)(DateTime.Now - la).TotalMinutes}m");
+                            }
+                        }
                     }
 
                     Console.WriteLine();
@@ -1915,7 +1942,7 @@ public class ConsoleUI
         const string ArchitectId = "huddle:architect";
         if (!_manager.Instances.TryGetValue(ArchitectId, out var architect) || !architect.IsAlive)
         {
-            Log($"architect not running — use 'start seatbelt architect' first");
+            Log($"architect not running — use 'start myapp architect' first");
             return;
         }
 
@@ -2031,6 +2058,22 @@ public class ConsoleUI
         }
         finally { Console.ResetColor(); }
         AppendToLogFile($"CRASH: {message}");
+    }
+
+    // Git network activity (pushes/fetches and credential-prompt requests). Cyan
+    // by default; yellow with attention:true so a session blocked on a GitHub auth
+    // pop-under — which the operator would otherwise never see — stands out.
+    public static void LogGit(string message, bool attention = false)
+    {
+        try
+        {
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.Write($"[{DateTime.Now:HH:mm:ss}] ");
+            Console.ForegroundColor = attention ? ConsoleColor.Yellow : ConsoleColor.Cyan;
+            Console.WriteLine(message);
+        }
+        finally { Console.ResetColor(); }
+        AppendToLogFile(message);
     }
 
     private static string ShortenPath(string path)

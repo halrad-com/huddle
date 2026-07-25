@@ -511,6 +511,43 @@ exit 0
                 }
             }
 
+            // Git credential-request logging. Point this session's git at a
+            // per-session system config that runs a logging helper
+            // (huddle --cred-log) BEFORE GCM, so when an agent's git blocks on a
+            // GitHub/Azure credential prompt — a pop-under the operator never sees
+            // — huddle announces which session+repo is asking. The helper logs the
+            // request and falls through to the real GCM for the actual auth; it
+            // never sees the credential itself. Scoped to this session via
+            // GIT_CONFIG_SYSTEM (an [include] preserves the real system config);
+            // nothing global is touched. Non-fatal — without it the session just
+            // won't surface its auth requests.
+            var gitAuthSet = "";
+            if (Ipc != null)
+            {
+                try
+                {
+                    var huddleExe = Environment.ProcessPath;
+                    if (!string.IsNullOrEmpty(huddleExe))
+                    {
+                        var sessionGitConfig = Path.Combine(sessionLogDir, $"{instance.SafePathName}-gitconfig");
+                        // Include the Claude session GUID so the auth line names the
+                        // specific agent, not just its repo (several sessions can share
+                        // a repo, and auto-started ones have no persona in instanceId).
+                        var sessionId = instance.SessionId?.ToString() ?? "";
+                        GitActivityMonitor.WriteCredentialLoggerConfig(
+                            sessionGitConfig, huddleExe, GitHelper.SystemConfigPath(), instanceId, sessionId, Ipc.GitAuthDir);
+                        // A file path is a non-empty value, so cmd's `set` holds it
+                        // fine (unlike the empty-reset, which is why the reset lives
+                        // inside the config file, not here).
+                        gitAuthSet = $"set \"GIT_CONFIG_SYSTEM={sessionGitConfig}\" && ";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _log($"[{instance.InstanceId}] git-auth logging setup failed (continuing without): {ex.Message}");
+                }
+            }
+
             // Env vars exported to the child Claude Code process:
             //   BUN_CRASH_REPORTER_URL — silenced so Bun crash dialogs stay inside this session
             //   CLAUDE_SESSION_LABEL  — literal statusline label (used by ~/.claude/statusline.ps1)
@@ -523,7 +560,8 @@ exit 0
             var envPrefix = $"title huddle: {instanceId} && " +
                             "set BUN_CRASH_REPORTER_URL= && " +
                             $"set CLAUDE_SESSION_LABEL={instanceId} && " +
-                            hookPendingSet;
+                            hookPendingSet +
+                            gitAuthSet;
             if (!string.IsNullOrEmpty(persona))
                 envPrefix += $"set CLAUDE_PERSONA={persona} && ";
 

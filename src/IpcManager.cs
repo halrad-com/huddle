@@ -111,6 +111,11 @@ public class IpcManager : IDisposable
     public string QueueDir => Path.Combine(_ipcDir, "workledger", "queue");
     public string ResLedgerDir => Path.Combine(_ipcDir, "resledger");
 
+    // Drop dir for git credential-request notices. The per-session credential
+    // logger (`huddle --cred-log`) writes small files here; GitActivityMonitor
+    // tails them so a session blocked on a GitHub auth prompt is surfaced.
+    public string GitAuthDir => Path.Combine(_ipcDir, "gitauth");
+
     public IpcManager(string ipcDir, Action<string> log)
     {
         _ipcDir = ipcDir;

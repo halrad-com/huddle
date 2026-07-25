@@ -27,6 +27,19 @@ public static class BuildInfo
 
     public static string Branch => Meta().branch;
     public static string Commit => Meta().commit;
+
+    /// <summary>
+    /// Raw `git describe --tags --long --always` baked at build time, e.g.
+    /// "public-release-20260722-2-g12f0169" (tag, commits-since, g-hash) or a bare
+    /// hash when the repo has no tags. "unknown" if git wasn't available at build.
+    /// </summary>
+    public static string Describe => Metadata("GitDescribe");
+
+    /// <summary>Nearest tag reachable from the built commit, or null if none/unknown.</summary>
+    public static string? NearestTag => ParseDescribe().tag;
+
+    /// <summary>Commits between the nearest tag and the built commit, or null if unknown.</summary>
+    public static int? CommitsSinceTag => ParseDescribe().count;
     public static string ShortCommit
     {
         get { var c = Commit; return c.Length >= 7 ? c[..7] : c; }
@@ -55,9 +68,14 @@ public static class BuildInfo
         get
         {
             var bt = BuildTime;
+            var n = CommitsSinceTag;
+            var tagLine = NearestTag is { } tag
+                ? $"  tag:    {tag} (+{n} commit{(n == 1 ? "" : "s")})\n"
+                : "  tag:    (none)\n";
             return $"huddle v{Version}\n" +
                    $"  branch: {Branch}\n" +
                    $"  commit: {Commit}\n" +
+                   tagLine +
                    $"  built:  {(bt.HasValue ? bt.Value.ToString("yyyy-MM-dd HH:mm:ss") : "unknown")}";
         }
     }
@@ -74,5 +92,29 @@ public static class BuildInfo
         return dot < 0
             ? (meta.Trim(), "unknown")
             : (meta[..dot].Trim(), meta[(dot + 1)..].Trim());
+    }
+
+    // Read an AssemblyMetadata value baked by the StampGitInfo target, or "" if absent.
+    private static string Metadata(string key)
+    {
+        foreach (var a in Assembly.GetExecutingAssembly().GetCustomAttributes<AssemblyMetadataAttribute>())
+            if (string.Equals(a.Key, key, StringComparison.Ordinal))
+                return a.Value ?? "";
+        return "";
+    }
+
+    // Parse "<tag>-<N>-g<hash>" (git describe --long). Tag names may contain hyphens,
+    // so the last two '-'-separated fields are N and g<hash>; everything before is the
+    // tag. A bare hash (no tags → --always fallback) or "unknown" yields (null, null).
+    private static (string? tag, int? count) ParseDescribe()
+    {
+        var d = Describe;
+        if (string.IsNullOrEmpty(d) || d == "unknown") return (null, null);
+        var parts = d.Split('-');
+        if (parts.Length < 3) return (null, null);          // bare hash, no tag
+        var last = parts[^1];
+        if (last.Length < 2 || last[0] != 'g') return (null, null);
+        if (!int.TryParse(parts[^2], out var count)) return (null, null);
+        return (string.Join('-', parts[..^2]), count);
     }
 }

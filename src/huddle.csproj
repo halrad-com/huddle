@@ -32,9 +32,22 @@
       <Output TaskParameter="ConsoleOutput" PropertyName="GitCommit" />
       <Output TaskParameter="ExitCode" PropertyName="GitCommitExit" />
     </Exec>
+    <!-- Nearest tag reachable from the built commit, plus commits since it, as
+         "tag-N-ghash". The long flag always includes the N-g suffix even at N=0;
+         the always flag falls back to a bare hash when the repo has no tags. -->
+    <Exec Command="git describe --tags --long --always"
+          ConsoleToMSBuild="true"
+          IgnoreExitCode="true"
+          WorkingDirectory="$(MSBuildProjectDirectory)"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="GitDescribe" />
+      <Output TaskParameter="ExitCode" PropertyName="GitDescribeExit" />
+    </Exec>
     <PropertyGroup>
       <GitBranch Condition="'$(GitBranchExit)' != '0' or '$(GitBranch)' == ''">unknown</GitBranch>
       <GitCommit Condition="'$(GitCommitExit)' != '0' or '$(GitCommit)' == ''">unknown</GitCommit>
+      <GitDescribe Condition="'$(GitDescribeExit)' != '0' or '$(GitDescribe)' == ''">unknown</GitDescribe>
       <SourceRevisionId>$(GitCommit)</SourceRevisionId>
       <!-- We build the full informational version ourselves (branch + commit as
            dot-separated semver build metadata), so suppress the SDK's automatic
@@ -50,6 +63,10 @@
       <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
         <_Parameter1>GitCommit</_Parameter1>
         <_Parameter2>$(GitCommit)</_Parameter2>
+      </AssemblyAttribute>
+      <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+        <_Parameter1>GitDescribe</_Parameter1>
+        <_Parameter2>$(GitDescribe)</_Parameter2>
       </AssemblyAttribute>
     </ItemGroup>
   </Target>
