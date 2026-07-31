@@ -157,10 +157,22 @@ public class IpcManager : IDisposable
     /// context instead of pushed keystrokes. Newlines are collapsed so one call
     /// is always exactly one line. Retries briefly if the hook is mid-drain.
     /// </summary>
-    public void AppendPending(string safePathName, string line)
+    /// <summary>
+    /// Non-blocking pending lines are written with this leading sentinel (SOH,
+    /// 0x01). The session's Stop hook routes sentinel-prefixed lines to
+    /// additionalContext — quiet, Claude-visible — instead of a decision:block,
+    /// which the CLI renders as a red "Stop hook error". Info replies (ack/nack)
+    /// are notifications, not interruptions, so they must never wake a stop as an
+    /// error. The sentinel is stripped by the hook before display and is not
+    /// counted as backlog.
+    /// </summary>
+    public const char InfoPendingSentinel = '';
+
+    public void AppendPending(string safePathName, string line, bool blocking = true)
     {
         if (string.IsNullOrEmpty(safePathName) || string.IsNullOrEmpty(line)) return;
         line = line.Replace("\r\n", " ").Replace("\r", " ").Replace("\n", " ");
+        if (!blocking) line = InfoPendingSentinel + line;
         var path = PendingPath(safePathName);
         for (int attempt = 0; attempt < 5; attempt++)
         {
@@ -608,7 +620,10 @@ public class IpcManager : IDisposable
                 var pending = Path.Combine(sessionDir, PendingFileName);
                 if (File.Exists(pending))
                 {
-                    queued = File.ReadAllLines(pending).Count(l => !string.IsNullOrWhiteSpace(l));
+                    // Info replies (sentinel-prefixed) are notifications, not
+                    // queued work — they never block a stop, so they aren't backlog.
+                    queued = File.ReadAllLines(pending)
+                        .Count(l => !string.IsNullOrWhiteSpace(l) && l[0] != InfoPendingSentinel);
                     if (queued > 0) oldest = File.GetLastWriteTime(pending);
                 }
             }

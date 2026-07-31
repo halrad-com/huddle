@@ -108,4 +108,26 @@ public class MailBacklogTests : IDisposable
         Assert.Equal("app_reviewer", rows[0].Session);
         Assert.Equal(2, rows[0].Unread);
     }
+
+    [Fact]
+    public void Nonblocking_pending_lines_carry_the_info_sentinel()
+    {
+        _ipc.AppendPending("app_architect", "ack line", blocking: false);
+        _ipc.AppendPending("app_architect", "nudge line");   // blocking (default)
+
+        var lines = File.ReadAllLines(_ipc.PendingPath("app_architect"));
+        Assert.Equal(2, lines.Length);
+        Assert.Equal(IpcManager.InfoPendingSentinel, lines[0][0]);      // info prefixed
+        Assert.NotEqual(IpcManager.InfoPendingSentinel, lines[1][0]);   // actionable not
+    }
+
+    [Fact]
+    public void Info_replies_are_not_counted_as_queued_backlog()
+    {
+        _ipc.AppendPending("app_architect", "[huddle mail from x] read your inbox"); // blocking
+        _ipc.AppendPending("app_architect", "[huddle ack:release] released 2", blocking: false);
+
+        var row = Assert.Single(_ipc.GetBacklog());
+        Assert.Equal(1, row.Queued);   // only the actionable nudge is backlog
+    }
 }

@@ -1124,7 +1124,10 @@ public class Orchestrator : IDisposable
 
         // Pending-context delivery (drained by the session's hook) rather than
         // keystroke injection — never stomps an operator's in-progress prompt.
-        _ipc.AppendPending(inst.SafePathName, text);
+        // ack/nack replies are notifications, not interruptions: deliver them
+        // non-blocking so the Stop hook surfaces them quietly (additionalContext)
+        // instead of a decision:block the CLI renders as a "Stop hook error".
+        _ipc.AppendPending(inst.SafePathName, text, blocking: false);
     }
 
     public void Dispose()

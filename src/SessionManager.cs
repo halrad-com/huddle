@@ -76,10 +76,39 @@ if (-not $content) { exit 0 }
 $content = $content.TrimEnd()
 if ($content.Length -eq 0) { exit 0 }
 
+# Split drained lines into two lanes. Info lines carry a leading SOH (0x01)
+# sentinel written by huddle for ack/nack replies: they must NOT block the stop,
+# because a blocked stop renders as a red 'Stop hook error' in the CLI and an ack
+# is not an error. Actionable lines (real mail nudges) still block, to wake the
+# session into a fresh turn.
+$actionable = @()
+$info = @()
+foreach ($line in ($content -split ""`n"")) {
+    $t = $line.TrimEnd([char]13)
+    if ($t.Length -eq 0) { continue }
+    if ($t[0] -eq [char]1) { $info += $t.Substring(1) } else { $actionable += $t }
+}
+$actionText = ($actionable -join ""`n"")
+$infoText = ($info -join ""`n"")
+
 if ($evt -eq 'Stop') {
-    $out = @{ decision = 'block'; reason = $content }
+    if ($actionText.Length -gt 0) {
+        # A wake is warranted anyway, so fold any info in with the block reason.
+        $reason = $actionText
+        if ($infoText.Length -gt 0) { $reason = $reason + ""`n"" + $infoText }
+        $out = @{ decision = 'block'; reason = $reason }
+    } elseif ($infoText.Length -gt 0) {
+        # Info only: let the stop proceed and surface it quietly, not as an error.
+        $out = @{ hookSpecificOutput = @{ hookEventName = $evt; additionalContext = $infoText } }
+    } else {
+        exit 0
+    }
 } else {
-    $out = @{ hookSpecificOutput = @{ hookEventName = $evt; additionalContext = $content } }
+    $all = $actionText
+    if ($infoText.Length -gt 0) {
+        if ($all.Length -gt 0) { $all = $all + ""`n"" + $infoText } else { $all = $infoText }
+    }
+    $out = @{ hookSpecificOutput = @{ hookEventName = $evt; additionalContext = $all } }
 }
 $out | ConvertTo-Json -Compress -Depth 5
 exit 0
