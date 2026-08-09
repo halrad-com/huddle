@@ -31,6 +31,14 @@ public class SessionInstance
     public string? ActivePersona { get; set; }
     public Guid? SessionId { get; set; }
 
+    // The task this session was started for (I010 F3) — the spawn prompt / dispatch
+    // task text, persisted so the crash-recovery roster can say what a dead session
+    // was doing without transcript forensics. Null for bare starts.
+    public string? DeclaredPurpose { get; set; }
+
+    // Project slug this session serves (projects phase 1); null when unstamped.
+    public string? Project { get; set; }
+
     // Console window handle, captured at spawn (see SessionWindow). Not persisted:
     // handles do not survive a huddle restart, so sessions recovered from state.json
     // have none and cannot be focused until they are restarted.

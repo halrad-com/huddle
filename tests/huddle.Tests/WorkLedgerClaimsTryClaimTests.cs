@@ -82,6 +82,82 @@ public class WorkLedgerClaimsTryClaimTests : IDisposable
         Assert.Single(conflicts);
     }
 
+    // ---- I008: repo-qualified conflict matching + path-normalization guardrails ----
+
+    private static WorkLedgerClaim MakeIn(string repo, string session, string id, params string[] files) =>
+        new(session, repo, id, DateTime.UtcNow, "abc123", files);
+
+    [Fact]
+    public void DifferentReposSameRelativePathBothGranted()
+    {
+        // The I008 incident: huddle README.md falsely blocked corelib README.md.
+        Assert.True(_claims.TryClaim(MakeIn("huddle", "huddle:architect", "R-1", "README.md"), out _));
+
+        var ok = _claims.TryClaim(MakeIn("corelib", "workspace:reviewer", "R-2", "README.md"), out var conflicts);
+
+        Assert.True(ok);
+        Assert.Empty(conflicts);
+        Assert.Equal(2, _claims.ReadAll().Count);
+    }
+
+    [Fact]
+    public void LegacyEmptyRepoClaimStillConflictsWithAnyRepo()
+    {
+        // Fail-safe: a claim with no repo recorded (legacy/malformed file) must keep
+        // its I005 protection — it collides with every repo on path overlap.
+        _claims.Write(new WorkLedgerClaim("old:session", "", "B-legacy", DateTime.UtcNow, "abc123",
+            new[] { "docs/plan.md" }));
+
+        var ok = _claims.TryClaim(MakeIn("huddle", "huddle:architect", "R-2", "docs/plan.md"), out var conflicts);
+
+        Assert.False(ok);
+        Assert.Single(conflicts);
+    }
+
+    [Fact]
+    public void SlashDirectionDoesNotDefeatConflict()
+    {
+        // Guardrail: backslash vs forward slash is the same file — a claim written
+        // with Windows separators must still collide.
+        Assert.True(_claims.TryClaim(MakeIn("huddle", "huddle:architect", "R-1", @"src\a.cs"), out _));
+
+        var ok = _claims.TryClaim(MakeIn("huddle", "huddle:backenddev", "R-2", "src/a.cs"), out var conflicts);
+
+        Assert.False(ok);
+        Assert.Single(conflicts);
+    }
+
+    [Fact]
+    public void DotSlashPrefixDoesNotDefeatConflict()
+    {
+        Assert.True(_claims.TryClaim(MakeIn("huddle", "huddle:architect", "R-1", "./src/a.cs"), out _));
+
+        var ok = _claims.TryClaim(MakeIn("huddle", "huddle:backenddev", "R-2", "src/a.cs"), out var conflicts);
+
+        Assert.False(ok);
+        Assert.Single(conflicts);
+    }
+
+    [Fact]
+    public void FindOverlaps_IsRepoAware()
+    {
+        // Self-overlap check inside one dispatch batch: same path in two DIFFERENT
+        // repos is not an overlap; same repo still is.
+        var crossRepo = WorkLedgerClaims.FindOverlaps(new[]
+        {
+            MakeIn("huddle", "huddle:a", "B-1", "README.md"),
+            MakeIn("corelib", "corelib:b", "B-1", "README.md"),
+        });
+        Assert.Empty(crossRepo);
+
+        var sameRepo = WorkLedgerClaims.FindOverlaps(new[]
+        {
+            MakeIn("huddle", "huddle:a", "B-1", "README.md"),
+            MakeIn("huddle", "huddle:b", "B-1", "README.md"),
+        });
+        Assert.Single(sameRepo);
+    }
+
     [Fact]
     public async Task ConcurrentClaimantsExactlyOneWins()
     {

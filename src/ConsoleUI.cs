@@ -215,6 +215,9 @@ public class ConsoleUI
             Console.WriteLine("  open <n>                 Open the nth document from the last 'docs' listing");
             Console.WriteLine("  history [@repo] [kw] [-1d/-1w]  List past sessions from transcripts; 'history <n>' for detail, 'resume <n>' to reopen");
             Console.WriteLine("  find <kw> [@repo] [-1d/-1w]  Content search: docs, sessions, notes, mail — 'open <n>' / 'resume <n>' on the results");
+            Console.WriteLine("  recover [n|all|dismiss n]  List sessions lost to a crash and relaunch them show-and-pick");
+            Console.WriteLine("  projects [html [path]]   List projects; 'projects html' writes the status page (repro output demo)");
+            Console.WriteLine("  project <slug>           Project detail: artifacts, sprint, live sessions, claims");
             Console.WriteLine("  direct <english task>    Hand a task to huddle:architect to plan + dispatch automatically");
             Console.WriteLine("  quit                     Exit huddle, sessions keep running");
             Console.WriteLine("  shutdown                 Stop all sessions and exit");
@@ -370,6 +373,18 @@ public class ConsoleUI
 
             case "find":
                 HandleFind(arg);
+                break;
+
+            case "recover":
+                HandleRecover(arg);
+                break;
+
+            case "projects":
+                HandleProjects(arg);
+                break;
+
+            case "project":
+                HandleProjectDetail(arg);
                 break;
 
             case "personas" or "p":
@@ -1198,6 +1213,466 @@ public class ConsoleUI
     private const int HistoryPageSize = 15;
     private List<SessionSummary> _lastHistory = new();
     private int _historyPageOffset;
+
+    // ---- `projects` / `project <slug>` — the lens (projects phase 1) -----------
+    // Spec: docs/superpowers/specs/2026-08-09-projects-artifacts-tasks-design.md
+    // Repo layer (docs/projects/<slug>/) is standalone truth; projects-map.json
+    // overlays notes/links; live bindings (sessions, claims, roster) are derived
+    // fresh at read time — nothing stored, nothing to go stale.
+
+    // Set by Program: <configDir>/projects-map.json (may not exist — that's fine).
+    public string? ProjectsMapPath { get; set; }
+
+    private List<ProjectInfo> DiscoverProjects()
+    {
+        string? mapJson = null;
+        try
+        {
+            if (ProjectsMapPath != null && File.Exists(ProjectsMapPath))
+                mapJson = File.ReadAllText(ProjectsMapPath);
+        }
+        catch (Exception ex) { Log($"projects: cannot read map ({ex.Message}) — repo layer only."); }
+
+        return ProjectMap.Discover(
+            _manager.Repos.Select(kv => (kv.Key, kv.Value.Root)), mapJson, Log);
+    }
+
+    private List<WorkLedgerClaim> ReadActiveClaims()
+    {
+        var dir = Ipc?.ClaimsDir;
+        if (dir == null || !Directory.Exists(dir)) return new();
+        return new WorkLedgerClaims(dir, Log).ReadAll().ToList();
+    }
+
+    private void HandleProjects(string arg)
+    {
+        var a = arg.Trim();
+        if (a.StartsWith("html", StringComparison.OrdinalIgnoreCase))
+        {
+            HandleProjectsHtml(a["html".Length..].Trim());
+            return;
+        }
+        if (a.Length > 0)
+        {
+            Log("Usage: projects [html [path]]   (or 'project <slug>' for detail)");
+            return;
+        }
+
+        var projects = DiscoverProjects();
+        if (projects.Count == 0)
+        {
+            Log("No projects found. A project = docs/projects/<slug>/project.md in a registered repo (see the projects spec).");
+            return;
+        }
+
+        var claims = ReadActiveClaims();
+        Log($"{projects.Count} project(s):");
+        foreach (var p in projects)
+        {
+            var live = _manager.Instances.Values.Count(i => i.IsAlive &&
+                string.Equals(i.Project, p.Slug, StringComparison.OrdinalIgnoreCase));
+            var held = claims.Count(c => string.Equals(c.Project, p.Slug, StringComparison.OrdinalIgnoreCase));
+
+            var extras = "";
+            if (p.MapOnly) extras += "  (map-only — no project.md found)";
+            else
+            {
+                if (p.SprintId != null) extras += $"  sprint {p.SprintId}" + (p.SprintVersion != null ? $" ({p.SprintVersion})" : "");
+                if (live > 0) extras += $"  {live} live";
+                if (held > 0) extras += $"  {held} claim(s)";
+                if (p.MapNotes != null || p.MapLinks.Count > 0) extras += "  map";
+                var moreRepos = p.Repos.Count - 1;
+                if (moreRepos > 0) extras += $"  +{moreRepos} repo(s)";
+            }
+
+            Log($"  {p.Slug,-14} {p.Status,-8} {p.Title}  ({(p.MapOnly ? "-" : p.HomeRepo)}){extras}");
+            if (p.Warning != null)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"                 ! {p.Warning}");
+                Console.ResetColor();
+            }
+        }
+        Log("Use 'project <slug>' for detail.");
+    }
+
+    // `projects html [path]` — render the lens to a self-contained HTML page.
+    // The reproducible output demo: regenerated from live data on every run.
+    private void HandleProjectsHtml(string pathArg)
+    {
+        var projects = DiscoverProjects();
+        var claims = ReadActiveClaims();
+
+        var entries = projects.Select(p => new ProjectReportEntry(
+            p,
+            GatherAgents(p.Slug),
+            claims.Where(c => string.Equals(c.Project, p.Slug, StringComparison.OrdinalIgnoreCase)).ToList()
+        )).ToList();
+
+        var outPath = pathArg.Length > 0
+            ? Path.GetFullPath(pathArg)
+            : Path.Combine(
+                Path.GetDirectoryName(StateFile ?? ".") ?? ".",
+                "workspace", "projects-report.html");
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+            File.WriteAllText(outPath, ProjectReport.Render(entries, $"huddle {BuildInfo.Short}"));
+            Log($"projects: wrote {entries.Count} project(s) -> {Hyperlink(outPath, outPath)}");
+            Log($"  open it: shell {outPath}");
+        }
+        catch (Exception ex)
+        {
+            Log($"projects: html write failed — {ex.Message}");
+        }
+    }
+
+    // The usual suspects for a project: agents that work/worked on it, newest state
+    // first (live > recoverable > past), deduped by instance id. Sources: the live
+    // registry, the crash-recovery roster, and the state archive — history deepens
+    // as project stamps accumulate.
+    private List<ProjectAgent> GatherAgents(string slug)
+    {
+        var agents = new List<ProjectAgent>();
+        bool Match(string? project) => string.Equals(project, slug, StringComparison.OrdinalIgnoreCase);
+
+        foreach (var i in _manager.Instances.Values.Where(i => i.IsAlive && Match(i.Project)))
+            agents.Add(new ProjectAgent(i.InstanceId, i.ActivePersona, i.DeclaredPurpose, "live", i.StartedAt));
+
+        foreach (var r in _manager.Recoverable.Where(r => Match(r.Project)))
+            agents.Add(new ProjectAgent(r.InstanceId, r.Persona, r.DeclaredPurpose, "recoverable", r.DiedAt));
+
+        // Past: the state archive (recover/dismiss outcomes) — one JSON object per line.
+        try
+        {
+            var archive = Path.Combine(Path.GetDirectoryName(StateFile ?? ".") ?? ".", "state-archive.jsonl");
+            if (File.Exists(archive))
+            {
+                foreach (var line in File.ReadLines(archive))
+                {
+                    try
+                    {
+                        using var doc = System.Text.Json.JsonDocument.Parse(line);
+                        if (!doc.RootElement.TryGetProperty("entry", out var entry)) continue;
+                        var project = entry.TryGetProperty("project", out var pj) ? pj.GetString() : null;
+                        if (!Match(project)) continue;
+                        var when = doc.RootElement.TryGetProperty("archivedAt", out var at) &&
+                                   at.ValueKind == System.Text.Json.JsonValueKind.String &&
+                                   DateTime.TryParse(at.GetString(), out var t) ? t : (DateTime?)null;
+                        agents.Add(new ProjectAgent(
+                            entry.TryGetProperty("instanceId", out var id) ? id.GetString() ?? "?" : "?",
+                            entry.TryGetProperty("persona", out var pe) ? pe.GetString() : null,
+                            entry.TryGetProperty("declaredPurpose", out var dp) ? dp.GetString() : null,
+                            "past", when));
+                    }
+                    catch (Exception) { /* one bad line never kills the roster */ }
+                }
+            }
+        }
+        catch (Exception) { /* archive unreadable — live + recoverable still shown */ }
+
+        // Dedupe by instance id: strongest state wins (live > recoverable > past).
+        static int Rank(string s) => s switch { "live" => 0, "recoverable" => 1, _ => 2 };
+        return agents
+            .GroupBy(a => a.InstanceId, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderBy(a => Rank(a.State)).ThenByDescending(a => a.LastSeen).First())
+            .OrderBy(a => Rank(a.State)).ThenByDescending(a => a.LastSeen)
+            .ToList();
+    }
+
+    private void HandleProjectDetail(string arg)
+    {
+        var slug = arg.Trim();
+        if (slug.Length == 0) { Log("Usage: project <slug>"); return; }
+
+        var p = DiscoverProjects().FirstOrDefault(x =>
+            x.Slug.Equals(slug, StringComparison.OrdinalIgnoreCase));
+        if (p == null) { Log($"project: no project '{slug}' — 'projects' lists what exists."); return; }
+
+        Log($"{p.Slug} — {p.Title}  [{p.Status}]{(p.MapOnly ? "  (map-only)" : "")}");
+        if (!string.IsNullOrEmpty(p.Goal)) Log($"  goal: {p.Goal}");
+        if (p.Repos.Count > 0) Log($"  repos: {string.Join(", ", p.Repos)}   home: {p.HomeRepo}");
+        if (p.SprintId != null) Log($"  sprint: {p.SprintId}{(p.SprintVersion != null ? $"  version: {p.SprintVersion}" : "")}");
+        if (p.Warning != null) Log($"  ! {p.Warning}");
+        if (p.MapNotes != null) Log($"  map notes: {p.MapNotes}");
+        foreach (var link in p.MapLinks) Log($"  link: {link}");
+
+        // Typed artifacts + declared children load into _lastDocs so `open <n>` works.
+        _findMap = null;
+        _lastDocs = new List<DocumentEntry>();
+        if (!p.MapOnly)
+        {
+            var projectDoc = Path.Combine(p.Dir, "project.md");
+            _lastDocs.Add(new DocumentEntry("project.md", projectDoc, p.Slug, p.HomeRepo, null, DocLevel.Output, "project"));
+            foreach (var t in p.TypedArtifacts)
+                _lastDocs.Add(new DocumentEntry(t, Path.Combine(p.Dir, t), p.Slug, p.HomeRepo, null, DocLevel.Output, "typed"));
+        }
+        foreach (var (repoName, path) in FindDeclaredChildren(p.Slug))
+        {
+            if (_lastDocs.Any(d => string.Equals(d.Path, path, StringComparison.OrdinalIgnoreCase)))
+                continue; // hand-listed/typed already covers it
+            _lastDocs.Add(new DocumentEntry(Path.GetFileName(path), path, p.Slug, repoName, null, DocLevel.Output, "declared"));
+        }
+        _docsPageOffset = _lastDocs.Count;
+
+        if (_lastDocs.Count > 0)
+        {
+            Log($"  artifacts ({_lastDocs.Count}) — 'open <n>':");
+            for (var i = 0; i < _lastDocs.Count; i++)
+                Log($"  {i + 1,3}. {Hyperlink(_lastDocs[i].Title, _lastDocs[i].Path)}  ({_lastDocs[i].Repo}, {_lastDocs[i].Note})");
+        }
+
+        // Live bindings — derived fresh, never stored.
+        var liveSessions = _manager.Instances.Values
+            .Where(i => i.IsAlive && string.Equals(i.Project, p.Slug, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var s in liveSessions)
+            Log($"  live: {s.InstanceId}  ({s.FormatUptime()})");
+
+        foreach (var c in ReadActiveClaims().Where(c =>
+                     string.Equals(c.Project, p.Slug, StringComparison.OrdinalIgnoreCase)))
+            Log($"  claim: {c.SessionId} holds {c.Files.Count} file(s) ({c.BatchId})");
+
+        foreach (var r in _manager.Recoverable.Where(r =>
+                     string.Equals(r.Project, p.Slug, StringComparison.OrdinalIgnoreCase)))
+            Log($"  recoverable: {r.InstanceId} — 'recover' to relaunch");
+    }
+
+    // Frontmatter-declared children: any docs/**/*.md in a registered repo whose
+    // frontmatter says `project: <slug>`. Bounded: first 2KB per file is enough to
+    // cover any sane frontmatter block; unreadable files are skipped.
+    private IEnumerable<(string Repo, string Path)> FindDeclaredChildren(string slug)
+    {
+        foreach (var (repoName, def) in _manager.Repos.Select(kv => (kv.Key, kv.Value)))
+        {
+            var docsDir = Path.Combine(def.Root, "docs");
+            IEnumerable<string> files;
+            try
+            {
+                if (!Directory.Exists(docsDir)) continue;
+                files = Directory.EnumerateFiles(docsDir, "*.md", SearchOption.AllDirectories);
+            }
+            catch (Exception) { continue; }
+
+            foreach (var f in files)
+            {
+                string head;
+                try
+                {
+                    using var reader = new StreamReader(f);
+                    var buf = new char[2048];
+                    var n = reader.Read(buf, 0, buf.Length);
+                    head = new string(buf, 0, n);
+                }
+                catch (Exception) { continue; }
+
+                if (!head.StartsWith("---")) continue;
+                var fm = ProjectMap.ParseFrontmatter(head);
+                if (fm.TryGetValue("project", out var declared) &&
+                    declared.Equals(slug, StringComparison.OrdinalIgnoreCase))
+                    yield return (repoName, f);
+            }
+        }
+    }
+
+    // ---- `recover` — crash-recovery roster, show & pick (I010 F2) --------------
+    // Spec: docs/superpowers/specs/2026-08-09-oracle-recovery-design.md
+    // Dead sessions retained by SessionState.Recover are listed with declared
+    // purpose (fallback: transcript opening prompt) and last evidence; `recover <n>`
+    // relaunches via the resume spawn path; dismiss archives without relaunching.
+    // Entries are never deleted — they move to logs/state-archive.jsonl.
+
+    private List<SessionStateEntry>? _recoverMap;
+
+    // Set by Program at startup; the archive lives next to it.
+    public string? StateFile { get; set; }
+
+    private void HandleRecover(string arg)
+    {
+        var a = arg.Trim();
+
+        if (a.Length == 0) { PrintRecoverList(); return; }
+
+        if (a.StartsWith("dismiss", StringComparison.OrdinalIgnoreCase))
+        {
+            var rest = a["dismiss".Length..].Trim();
+            if (rest.Equals("all", StringComparison.OrdinalIgnoreCase))
+            {
+                var snapshot = RecoverSnapshot();
+                foreach (var e in snapshot) ArchiveRosterEntry(e, "dismissed");
+                Log($"recover: dismissed {snapshot.Count} entr(y/ies) — archived, not deleted.");
+                _recoverMap = null;
+                return;
+            }
+            if (int.TryParse(rest, out var dn))
+            {
+                var entry = MapEntry(dn);
+                if (entry == null) return;
+                ArchiveRosterEntry(entry, "dismissed");
+                Log($"recover: dismissed '{entry.InstanceId}' — archived.");
+                _recoverMap = null;
+                return;
+            }
+            Log("Usage: recover dismiss <n|all>");
+            return;
+        }
+
+        if (a.Equals("all", StringComparison.OrdinalIgnoreCase))
+        {
+            var snapshot = RecoverSnapshot();
+            if (snapshot.Count == 0) { Log("recover: nothing recoverable."); return; }
+            var launched = 0;
+            foreach (var e in snapshot)
+                if (RecoverOne(e)) launched++;
+            Log($"recover: relaunched {launched}/{snapshot.Count}.");
+            _recoverMap = null;
+            return;
+        }
+
+        if (int.TryParse(a, out var n))
+        {
+            var entry = MapEntry(n);
+            if (entry == null) return;
+            if (RecoverOne(entry)) _recoverMap = null;
+            return;
+        }
+
+        Log("Usage: recover [n|all|dismiss <n|all>]");
+    }
+
+    // The listed order (the map) — built by PrintRecoverList; `recover all` uses the
+    // roster directly when no listing was printed this session.
+    private List<SessionStateEntry> RecoverSnapshot() =>
+        _recoverMap != null ? new(_recoverMap) : new(_manager.Recoverable);
+
+    private SessionStateEntry? MapEntry(int n)
+    {
+        var map = _recoverMap ?? _manager.Recoverable;
+        if (n < 1 || n > map.Count)
+        {
+            Log(map.Count == 0
+                ? "recover: nothing recoverable."
+                : $"recover: {n} is out of range (1..{map.Count}) — run 'recover' to list.");
+            return null;
+        }
+        return map[n - 1];
+    }
+
+    private void PrintRecoverList()
+    {
+        var roster = _manager.Recoverable;
+        if (roster.Count == 0) { Log("recover: nothing recoverable."); return; }
+
+        var store = CreateTranscriptStore();
+
+        // Topology (F2): hubs — dispatchers and sessions with mail waiting — list
+        // first so `recover all` brings coordinators up before their workers.
+        var ipcRoot = Ipc?.IpcDir;
+        var processedDir = ipcRoot != null ? Path.Combine(ipcRoot, "_huddle", "processed") : null;
+        var topo = new Dictionary<SessionStateEntry, TopologyInfo>();
+        foreach (var e in roster)
+        {
+            topo[e] = ipcRoot != null && processedDir != null
+                ? RecoveryTopology.Analyze(e.InstanceId, e.StartedAt, processedDir, ipcRoot)
+                : new TopologyInfo(null, 0, false);
+        }
+        _recoverMap = roster.OrderByDescending(e => topo[e].IsHub).ToList();
+
+        Log($"{roster.Count} session(s) recoverable — 'recover <n>' to relaunch, 'recover all', 'recover dismiss <n|all>':");
+        for (var i = 0; i < _recoverMap.Count; i++)
+        {
+            var e = _recoverMap[i];
+            var purpose = e.DeclaredPurpose;
+            DateTime? lastEvidence = e.DiedAt;
+
+            // Fallbacks come from the transcript — never fatal when it's missing.
+            if (e.SessionId != null)
+            {
+                try
+                {
+                    var detail = store.GetDetail(e.SessionId);
+                    if (detail != null)
+                    {
+                        if (string.IsNullOrWhiteSpace(purpose))
+                            purpose = detail.Summary.OpeningPrompt;
+                        lastEvidence = detail.Summary.LastActivity ?? lastEvidence;
+                    }
+                }
+                catch { /* unreadable transcript: show what state.json knows */ }
+            }
+
+            purpose = string.IsNullOrWhiteSpace(purpose) ? "(unknown)" : purpose.Replace('\r', ' ').Replace('\n', ' ');
+            if (purpose.Length > 100) purpose = purpose[..100] + "…";
+            var personaLabel = e.Persona != null ? $" [{e.Persona}]" : "";
+
+            var t = topo[e];
+            var marks = "";
+            if (!string.IsNullOrEmpty(e.Project)) marks += $"  [{e.Project}]";
+            if (t.IsHub) marks += t.UnreadMail > 0 ? $"  HUB ({t.UnreadMail} waiting)" : "  HUB";
+            if (t.DispatchedBy != null) marks += $"  ← dispatched by {t.DispatchedBy}";
+
+            Log($"{i + 1,3}. {e.InstanceId}{personaLabel}  ({e.RepoName}){marks}");
+            Log($"     task: {purpose}");
+            Log($"     last: {Ago(lastEvidence)}   resume: claude --resume {e.SessionId ?? "(none)"}");
+        }
+    }
+
+    private bool RecoverOne(SessionStateEntry entry)
+    {
+        if (entry.SessionId == null)
+        {
+            Log($"recover: '{entry.InstanceId}' has no session id — nothing to resume. 'recover dismiss' to archive it.");
+            return false;
+        }
+        var repoName = _manager.ResolveRepoName(entry.RepoName);
+        if (!_manager.Repos.TryGetValue(repoName, out var def))
+        {
+            Log($"recover: repo '{entry.RepoName}' is not registered — cannot pick a working directory.");
+            return false;
+        }
+        if (!_manager.ResumeTranscript(entry.SessionId, def.Root))
+            return false; // ResumeTranscript logs why (incl. the still-live guard)
+
+        ArchiveRosterEntry(entry, "recovered");
+        Log($"recover: relaunched '{entry.InstanceId}' — {entry.SessionId} in {def.Root}");
+        return true;
+    }
+
+    // Remove from the roster, append to logs/state-archive.jsonl, persist state.
+    private void ArchiveRosterEntry(SessionStateEntry entry, string outcome)
+    {
+        _manager.Recoverable.Remove(entry);
+        try
+        {
+            if (StateFile != null)
+            {
+                var archive = Path.Combine(Path.GetDirectoryName(StateFile) ?? ".", "state-archive.jsonl");
+                var record = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    archivedAt = DateTime.Now,
+                    outcome,
+                    entry
+                });
+                File.AppendAllText(archive, record + Environment.NewLine);
+                SessionState.Save(StateFile, _manager.Instances, _manager.Recoverable);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"recover: archive write failed ({ex.Message}) — entry removed from roster for this run only.");
+        }
+    }
+
+    private static string Ago(DateTime? t)
+    {
+        if (t == null) return "(unknown)";
+        var span = DateTime.Now - t.Value;
+        if (span.TotalMinutes < 1) return "just now";
+        if (span.TotalHours < 1) return $"{(int)span.TotalMinutes}m ago";
+        if (span.TotalDays < 1) return $"{(int)span.TotalHours}h {span.Minutes}m ago";
+        return $"{(int)span.TotalDays}d ago";
+    }
 
     private TranscriptStore CreateTranscriptStore()
     {

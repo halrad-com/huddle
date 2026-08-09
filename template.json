@@ -60,5 +60,6 @@
   "contextFile": true,
   "crashLogRetention": 10,
   "rescanIntervalSeconds": 30,
-  "reclaimResourcesOnStop": false
+  "reclaimResourcesOnStop": false,
+  "seedPermissions": true
 }

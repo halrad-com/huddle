@@ -44,6 +44,14 @@ public class ContextWriter
                         lines.Add($"- **Root:** {instance.Root}");
                         lines.Add($"- **Purpose:** {instance.Purpose}");
 
+                        // I010 F3: the session's declared task (spawn prompt), one line.
+                        if (!string.IsNullOrWhiteSpace(instance.DeclaredPurpose))
+                        {
+                            var task = instance.DeclaredPurpose.Replace('\r', ' ').Replace('\n', ' ');
+                            if (task.Length > 160) task = task[..160] + "…";
+                            lines.Add($"- **Task:** {task}");
+                        }
+
                         var statusText = instance.Status switch
                         {
                             SessionStatus.Running => $"Running ({instance.FormatUptime()})",

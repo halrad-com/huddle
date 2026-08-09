@@ -255,7 +255,7 @@ class Program
                 ConsoleUI.LogCrash($"*** CRASH *** {instance.InstanceId} exited with code {instance.LastExitCode}");
 
             contextWriter?.Update(manager.Instances);
-            SessionState.Save(stateFile, manager.Instances);
+            SessionState.Save(stateFile, manager.Instances, manager.Recoverable);
         };
 
         // Register repo definitions
@@ -266,6 +266,12 @@ class Program
             manager.Register(def);
             ConsoleUI.Log($"Registered: {def.Name} -> {def.Root}");
         }
+
+        // I010 F4: keep every registered repo's permission allow-set seeded so the
+        // prompt-spam class can't regress per-repo. Merge-only; silent when already
+        // seeded; `"seedPermissions": false` in huddle.json disables.
+        PermissionSeeder.SeedAll(
+            config.Sessions.Select(s => (s.Name, s.Root)), config.SeedPermissions, ConsoleUI.Log);
 
         // Start the orchestrator only after repo definitions are registered.
         // Its startup inbox scan can process commands that resolve against the
@@ -282,6 +288,13 @@ class Program
         // (this is what makes "bounce huddle to reap dead-session claims" actually true).
         orchestrator?.ReapOrphanClaims();
 
+        // I010: dead sessions were held, not dropped — announce the roster.
+        ui.StateFile = stateFile;
+        // Projects phase 1: the huddle-map overlay lives beside huddle.json.
+        ui.ProjectsMapPath = Path.Combine(configDir, "projects-map.json");
+        if (manager.Recoverable.Count > 0)
+            ConsoleUI.Log($"{manager.Recoverable.Count} session(s) recoverable from a previous run — 'recover' to list.");
+
         // Auto-start repos (no persona for auto-start)
         foreach (var def in config.Sessions.Where(s => s.AutoStart))
         {
@@ -290,7 +303,7 @@ class Program
 
         // Write initial context and state
         contextWriter?.Update(manager.Instances);
-        SessionState.Save(stateFile, manager.Instances);
+        SessionState.Save(stateFile, manager.Instances, manager.Recoverable);
 
         // Git activity monitor: surface pushes/fetches (remote-tracking reflog) and
         // credential-prompt requests (auth drop dir) in the console. Poll-based.
@@ -382,14 +395,14 @@ class Program
             ConsoleUI.Log("Shutting down all sessions...");
             manager.StopAll();
             contextWriter?.Update(manager.Instances);
-            SessionState.Save(stateFile, manager.Instances); // Clear — all stopped
+            SessionState.Save(stateFile, manager.Instances, manager.Recoverable); // Clear — all stopped
         }
         else
         {
             var running = manager.Instances.Count(i => i.Value.IsAlive);
             if (running > 0)
             {
-                SessionState.Save(stateFile, manager.Instances); // Persist for recovery
+                SessionState.Save(stateFile, manager.Instances, manager.Recoverable); // Persist for recovery
                 ConsoleUI.Log($"Detaching. {running} session(s) still running.");
             }
         }

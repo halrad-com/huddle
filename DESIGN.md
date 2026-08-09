@@ -340,7 +340,7 @@ Sessions can have aliases — short names or alternative references:
 { "name": "myapp", "aliases": ["app", "web"], ... }
 ```
 
-Aliases work everywhere a repo name is accepted: `start rb architect`, `stop bee`, etc.
+Aliases work everywhere a repo name is accepted: `start app architect`, `stop bee`, etc.
 Use the `repos` command to see all registered repos and their aliases. Aliases must be
 unique across all repos — conflicts are logged and skipped on startup.
 
@@ -668,6 +668,65 @@ inbox-watcher thread cannot race with an auto-release from the session-state pol
 Commit messages become the decision trail. Session crashes are recoverable because
 committed work stays in git; uncommitted dirty files get a warning in the log.
 
+## Crash Recovery: the Roster and `recover`
+
+Dead is not disposable. When recovery finds a `state.json` entry whose process is gone
+(or fails the PID-identity check), the entry is retained as `"status": "recoverable"`
+instead of dropped, and every subsequent save carries the roster forward. The startup
+banner announces `N session(s) recoverable — 'recover' to list.`
+
+`recover` lists each dead session with its **persona**, **declared purpose** (captured
+at spawn from the task prompt; falls back to the transcript's opening user turn),
+**last evidence** (transcript last-write), and the ready-to-run resume command.
+`recover <n>` / `recover all` relaunch via the same spawn path as `resume` (still
+refusing live sessions); `recover dismiss` archives. Nothing is ever deleted — removals
+append to `logs/state-archive.jsonl`.
+
+**Topology-aware ordering:** workers report to hubs (the session that dispatched them,
+the lane-lead holding unread mail). The listing derives lineage from dispatch-batch
+files in `_huddle/processed/` (`← dispatched by <sender>`, matched by repo:persona
+within a 30-minute spawn window) and marks `HUB (n waiting)` from unread inbox counts —
+hubs sort first, so `recover all` brings coordinators up before their workers.
+
+Two companions make the crash class shrink over time:
+
+- **Permission seeding** (`PermissionSeeder`, `"seedPermissions"` in huddle.json,
+  default true): startup merges the standing allow-set into every registered repo's
+  `.claude/settings.local.json` — merge-only, daily backup before first modify,
+  unparseable files left untouched with a loud log.
+- **Dispatch shell discipline**: every orchestrator-dispatched prompt is prefixed with
+  `SessionManager.ShellDisciplinePreamble` (one command per call, no compound bash),
+  because fresh contexts don't inherit persona rules.
+
+## Projects: the Lens
+
+Work belongs to projects, and the model is two layers with distinct authority:
+
+- **Repo layer — standalone truth.** `docs/projects/<slug>/` in the project's primary
+  repo: `project.md` (frontmatter: slug/title/goal/status/repos) plus optional typed
+  artifacts using the standing terminology — `ROADMAP.md`, `BACKLOG.md`, `SPRINT.md`
+  (frontmatter `sprint: YYMM-N`, optional `version:`), `ISSUES.md`. Complete without
+  huddle; any reader of the repo understands the project.
+- **Huddle map — overlay.** `projects-map.json` beside `huddle.json` adds operator
+  notes/links and may hold map-only slugs (project doc not yet written). It never owns
+  identity — delete it and the repo layer stands.
+
+Association is both-ways: any doc anywhere joins a project via `project: <slug>`
+frontmatter; dispatch-batch tasks and `start-session` bodies carry an optional
+`"project"` that stamps the spawned session, its claims (`Project:` line), state.json,
+and the recovery roster. Live bindings are derived fresh at read time — nothing stored,
+nothing stale.
+
+`projects` lists what was discovered (status, sprint id, live/claim counts,
+slug-conflict warnings); `project <slug>` details one (artifacts wired into
+`open <n>`, frontmatter-declared children found by a bounded docs scan, live sessions,
+claims, recoverables). `projects html [path]` renders the whole lens to a
+self-contained HTML status page (inline CSS, file:// links, offline by construction) —
+per-project cards with a **usual suspects** table: agents that work/worked on the
+project with their last task-focus, merged from the live registry, the crash roster,
+and the state archive. Pure render over gathered data: identical inputs, identical
+page.
+
 ## Capture Replay (`replay` verb)
 
 Verification that an agent does once should not evaporate. The capture-to-test loop turns a
@@ -738,7 +797,7 @@ session directly. Auto-fire is an escape hatch from the relay problem, not a bli
 override — architect still narrates its plan before firing.
 
 `direct` always addresses `huddle:architect` (the architect running in the huddle repo,
-canonical name "seatbelt"). Multi-architect dispatch (directing a per-repo architect)
+canonical name "myapp"). Multi-architect dispatch (directing a per-repo architect)
 is a later enhancement.
 
 ## Shared Context: context.md
@@ -765,7 +824,7 @@ Last updated: 2026-02-21 03:15:00
 ## Project Structure
 
 ```
-seatbelt/
+myapp/
     huddle.sln
     huddle.json                 -- Session config (all repos)
     context.md                  -- Shared session awareness (auto-generated)
@@ -812,19 +871,19 @@ run it from the repo root or use `--config` to point at the config.
 
 | Command | Use Case | Example |
 |---------|----------|---------|
-| `start <repo> [persona] [prompt]` | Launch a Claude session in a repo's directory. Optionally assign a persona role and initial task. Aliases work. | `start rb architect` |
+| `start <repo> [persona] [prompt]` | Launch a Claude session in a repo's directory. Optionally assign a persona role and initial task. Aliases work. | `start app architect` |
 | `stop <instance\|repo>` | Stop a specific instance by ID, or all instances of a repo by name/alias. | `stop myapp` or `stop app:architect` |
-| `restart <instance>` | Restart a crashed or stopped instance. Keeps the last persona. Uses `--continue` if recovering from a crash so Claude can `/resume`. | `restart rb:architect` |
+| `restart <instance>` | Restart a crashed or stopped instance. Keeps the last persona. Uses `--continue` if recovering from a crash so Claude can `/resume`. | `restart app:architect` |
 | `repos` | List all registered repos with their purpose and aliases. Use this to see what's available and what short names you can use. | `repos` |
 | `personas` | List available persona roles. Shows all `.md` files in `personas/` (excluding `_` prefixed). | `personas` |
 | `status` | Show all active instances with status, uptime, root path, and active persona. Color-coded: green=running, red=crashed, yellow=starting/restarting. | `status` |
 | `huddle <group>` | Launch all sessions in a named group. Groups are defined in `huddle.json`. Run without argument to list available groups. | `huddle dev` |
-| `send <instance> <msg>` | Send an IPC message to a session's inbox. The session can read it from its mailbox. | `send rb:architect check the API docs` |
-| `messages <instance>` | Read messages in a session's inbox. Shows sender, type, subject, and body. | `messages rb:architect` |
+| `send <instance> <msg>` | Send an IPC message to a session's inbox. The session can read it from its mailbox. | `send app:architect check the API docs` |
+| `messages <instance>` | Read messages in a session's inbox. Shows sender, type, subject, and body. | `messages app:architect` |
 | `delegate "desc" to <instance>` | Delegate a task to a session. Creates a tracked task, sends it via IPC, and auto-starts the session if it's not running. | `delegate "fix login bug" to app:backenddev` |
 | `direct <english task>` | Hand a free-form task to `huddle:architect` with `autoFire: true`. Architect plans and dispatches via `dispatch-batch` without a confirmation step. | `direct clean up the auth flow` |
 | `broadcast <subject> <msg>` | Fan out an informational message to every live session. Orchestrator refuses command-type broadcasts. | `broadcast heads-up merge window in 30 min` |
-| `shell [<repo>] <data>` | Hand `<data>` to the OS shell (`ShellExecute`) — opens files, URLs, folders. Optional repo sets working directory. Fire-and-forget. | `shell rb deploy\\build.cmd` |
+| `shell [<repo>] <data>` | Hand `<data>` to the OS shell (`ShellExecute`) — opens files, URLs, folders. Optional repo sets working directory. Fire-and-forget. | `shell app deploy\\build.cmd` |
 | `tasks` | Show all tracked tasks with state (pending, delegated, in-progress, completed, failed), assignee, and description. | `tasks` |
 | `progress` | Show the last scratchpad checkpoint for each running session. Sessions write checkpoints to `logs/<name>/scratchpad.md` as they work. | `progress` |
 | `conflicts` | Show file claim overlaps across sessions. Reads both the freeform `workledger/*.md` files and the orchestrator-owned `workledger/claims/` files; lists active orchestrator claims even when no overlap. | `conflicts` |

@@ -352,6 +352,7 @@ public class Orchestrator : IDisposable
             var repo = body.GetProperty("repo").GetString() ?? "";
             var persona = body.TryGetProperty("persona", out var p) ? p.GetString() : null;
             var prompt = body.TryGetProperty("prompt", out var pr) ? pr.GetString() : null;
+            var project = body.TryGetProperty("project", out var pj) ? pj.GetString() : null;
 
             if (IsUnknownPersona(persona, out var personaErr))
             {
@@ -359,7 +360,7 @@ public class Orchestrator : IDisposable
                 return;
             }
 
-            var ok = _manager.Start(repo, persona, prompt: prompt);
+            var ok = _manager.Start(repo, persona, prompt: WithShellRules(prompt), project: project);
             if (ok) SendAck(msg.From, msg.Subject, $"started {repo}");
             else SendNack(msg.From, msg.Subject, $"failed to start {repo}");
         }
@@ -402,21 +403,60 @@ public class Orchestrator : IDisposable
             {
                 _log(ResourceLedger.FormatLeak(safe, entry));
                 if (_manager.Config.ReclaimResourcesOnStop && !string.IsNullOrWhiteSpace(entry.Cleanup))
-                {
-                    _log($"Orchestrator: reclaim (opt-in): {entry.Cleanup}");
-                    var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c " + entry.Cleanup)
-                    {
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    };
-                    System.Diagnostics.Process.Start(psi);
-                }
+                    RunReclaim(entry.Cleanup!);
             }
         }
         catch (Exception ex)
         {
             _log($"Orchestrator: resource-leak check failed for {instanceId}: {ex.Message}");
         }
+    }
+
+    // How long an opt-in reclaim command may run before huddle kills it. Cleanup is
+    // "kill a process / delete a temp profile" shaped — anything longer is hung.
+    private const int ReclaimTimeoutMs = 30_000;
+
+    // F2 hardening (2026-07-12 review): the cleanup string is agent-authored, so the
+    // execution must be observable and bounded — full command logged, output captured,
+    // hard timeout with kill, process disposed, and one bad entry never aborts the
+    // rest of the leak sweep. Still strictly opt-in via reclaimResourcesOnStop.
+    private void RunReclaim(string cleanup)
+    {
+        _log($"Orchestrator: reclaim (opt-in): cmd.exe /c {cleanup}");
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c " + cleanup)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc == null) { _log("Orchestrator: reclaim failed to start"); return; }
+
+            // Read both streams to EOF (also prevents pipe-full deadlock), then wait.
+            var stdout = proc.StandardOutput.ReadToEndAsync();
+            var stderr = proc.StandardError.ReadToEndAsync();
+            if (!proc.WaitForExit(ReclaimTimeoutMs))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                _log($"Orchestrator: reclaim TIMED OUT after {ReclaimTimeoutMs / 1000}s and was killed: {cleanup}");
+                return;
+            }
+            var outText = stdout.Result.Trim();
+            var errText = stderr.Result.Trim();
+            _log($"Orchestrator: reclaim exit {proc.ExitCode}" +
+                 (outText.Length > 0 ? $" — {Truncate(outText, 200)}" : "") +
+                 (errText.Length > 0 ? $" — stderr: {Truncate(errText, 200)}" : ""));
+        }
+        catch (Exception ex)
+        {
+            _log($"Orchestrator: reclaim failed: {ex.Message}");
+        }
+
+        static string Truncate(string s, int max) =>
+            s.Length <= max ? s : s[..max] + "…";
     }
 
     private void HandleDelegateTask(IpcMessage msg)
@@ -446,7 +486,7 @@ public class Orchestrator : IDisposable
             // Start target if needed
             if (startIfNeeded && !_manager.Instances.ContainsKey(assignTo))
             {
-                _manager.Start(repo, persona, prompt: description);
+                _manager.Start(repo, persona, prompt: WithShellRules(description));
             }
 
             // Send task to target session
@@ -744,13 +784,17 @@ public class Orchestrator : IDisposable
 
                 var baseSha = GitHelper.GetHeadSha(repoDef.Root) ?? "";
                 var sessionId = $"{resolvedRepo}:{persona}";
+                // Projects phase 1: optional project slug stamps the claim + unit +
+                // spawned session, so the lens can bind live work to its project.
+                var project = StringProp(t, "project");
                 var claim = new WorkLedgerClaim(
                     SessionId: sessionId,
                     Repo: resolvedRepo,
                     BatchId: batchId,
                     ClaimedAt: DateTime.UtcNow,
                     BaseCommit: baseSha,
-                    Files: files
+                    Files: files,
+                    Project: project ?? ""
                 );
 
                 // Work-unit id: explicit `id` if the caller supplied one (needed so
@@ -762,7 +806,7 @@ public class Orchestrator : IDisposable
                 var dependsOn = StringArrayProp(t, "dependsOn");
 
                 proposed.Add((claim, persona, prompt));
-                units.Add(new WorkUnit(unitId, resolvedRepo, persona, prompt, files, dependsOn));
+                units.Add(new WorkUnit(unitId, resolvedRepo, persona, prompt, files, dependsOn, Project: project));
                 idx++;
             }
 
@@ -883,7 +927,10 @@ public class Orchestrator : IDisposable
             var ownerInstance = ResolveOwner(msg.From);
             var ownerId = ownerInstance?.InstanceId ?? msg.From;
             var ownerGuid = ownerInstance?.SessionId?.ToString() ?? "";
-            var claim = new WorkLedgerClaim(ownerId, resolvedRepo, claimId, DateTime.UtcNow, baseSha, files, ownerGuid);
+            // Projects phase 1: caller may stamp the claim with its project slug;
+            // fall back to the owning session's stamp so dispatched workers inherit.
+            var claimProject = StringProp(body, "project") ?? ownerInstance?.Project ?? "";
+            var claim = new WorkLedgerClaim(ownerId, resolvedRepo, claimId, DateTime.UtcNow, baseSha, files, ownerGuid, claimProject);
 
             if (_claims.TryClaim(claim, out var conflicts))
             {
@@ -892,9 +939,13 @@ public class Orchestrator : IDisposable
             }
             else
             {
+                // Name the repo on BOTH sides: a wildcard match against a legacy
+                // no-repo claim is otherwise indistinguishable from a same-repo
+                // conflict, and I008 taught us an unexplained holder wastes everyone's
+                // time. (Post-I008 a cross-repo pair can only be a legacy claim.)
                 var detail = string.Join("; ", conflicts.Select(o =>
-                    $"{o.B.SessionId} holds {string.Join(", ", o.SharedFiles)}"));
-                _log($"Orchestrator: claim REJECTED — {msg.From}: {detail}");
+                    $"{o.B.SessionId} holds {string.Join(", ", o.SharedFiles)} in {(string.IsNullOrEmpty(o.B.Repo) ? "(unrecorded repo — legacy claim)" : o.B.Repo)}"));
+                _log($"Orchestrator: claim REJECTED — {msg.From} (repo {resolvedRepo}): {detail}");
                 SendNack(msg.From, msg.Subject, $"conflict: {detail} — do NOT edit those files; mail the holder to coordinate, or re-claim after they release");
             }
         }
@@ -1006,6 +1057,11 @@ public class Orchestrator : IDisposable
     /// indistinguishable from recovery not having populated instances, and reaping then would
     /// wrongly archive every live session's claims.
     /// </summary>
+    // I010 F5: dispatched contexts don't inherit persona shell rules; carry them in
+    // the task prompt itself. Empty prompts stay empty (nothing to instruct).
+    private static string? WithShellRules(string? prompt) =>
+        string.IsNullOrWhiteSpace(prompt) ? prompt : SessionManager.ShellDisciplinePreamble + prompt;
+
     public void ReapOrphanClaims()
     {
         try
@@ -1115,7 +1171,7 @@ public class Orchestrator : IDisposable
                 continue;
             }
 
-            var ok = _manager.Start(u.Repo, u.Persona, prompt: u.Prompt);
+            var ok = _manager.Start(u.Repo, u.Persona, prompt: WithShellRules(u.Prompt), project: u.Project);
             if (ok)
             {
                 _queue.MarkActive(u.Id);

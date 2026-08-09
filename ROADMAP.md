@@ -1,8 +1,8 @@
 # Claude Huddle Roadmap
 
-## History: Seatbelt → Claude Huddle
+## History: myapp → Claude Huddle
 
-Seatbelt started as a crash wrapper for Claude Code sessions. It evolved through six
+myapp started as a crash wrapper for Claude Code sessions. It evolved through six
 phases into a session orchestrator with IPC and task delegation.
 
 ```
@@ -34,7 +34,42 @@ PowerToys CmdPal extension v1               — DONE
 Persona tuning (JSON sidecars)              — DONE
 Capture-to-test replay                      — DONE
 Resource ledger + janitor                   — DONE
+Runtime claims arbiter (every path)         — DONE
+`history` / `resume` / `find` verbs         — DONE
+Mail read receipts + `backlog` verb         — DONE
+`focus` (spawn-time window capture)         — DONE
+Git activity + auth attribution             — DONE
+Crash recovery: roster + `recover` verb     — DONE
+Permission seeding + dispatch discipline    — DONE
+Projects phase 1 (lens + `projects html`)   — DONE
 ```
+
+Everything recent is indexed in [`CHANGELOG.md`](CHANGELOG.md) — that file is the
+running record; this list is the milestone view.
+
+## The Oracle: where v1 is heading
+
+Huddle owns the orchestration data — every session transcript, spawn record, claim,
+resource ledger, repo git state, doc, and piece of inter-agent mail. The vision:
+huddle is **the oracle** — the all-knowing layer over the agent pool that can answer,
+for any project, workstream, or task, at any time: *what was running, what was it for,
+where did it get to, what did it touch, and what does it take to bring it back.*
+
+```
+Recovery    — any dead session/workstream is resumable, never forensic.
+              recover verb, roster persistence, declared-purpose capture. SHIPPED.
+Review      — 360° audit on demand: correlate declared tasks vs tree evidence vs
+              commits vs transcripts; name the gaps. Next capability.
+Overwatch   — live fleet health: status/trouble, backlog, janitor, git activity,
+              claims — shipping piecewise; the oracle unifies them.
+Optimization— see waste (idle sessions, stale claims, stuck mail, duplicate work)
+              and surface it before the operator has to ask.
+```
+
+Projects (the structural substrate) shipped phase 1: the `projects` / `project <slug>`
+lens over repo-declared `docs/projects/<slug>/` dirs, a huddle-map overlay, and the
+reproducible `projects html` status page. Phase 2 (dispatch-from-project, status
+rollups, recover-by-project) is queued in the projects spec.
 
 **Work Ledger.** Per-session ledger files where each active session declares what it's
 working on and which files it's touching. `conflicts` flags overlaps; `progress`

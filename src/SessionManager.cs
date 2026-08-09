@@ -18,6 +18,21 @@ public class SessionManager
 
     public IReadOnlyDictionary<string, SessionDefinition> Repos => _repos;
     public IReadOnlyDictionary<string, SessionInstance> Instances => _instances;
+
+    // I010: dead sessions retained from state.json at recovery — the crash-recovery
+    // roster the `recover` verb lists. Populated by SessionState.Recover; entries
+    // leave only via `recover <n>` / `recover dismiss` (archived, never deleted).
+    public List<SessionStateEntry> Recoverable { get; } = new();
+
+    // I010 F5: prepended to every ORCHESTRATOR-dispatched task prompt (dispatch-batch,
+    // start-session, delegate-task). Operator-typed starts get these rules via the
+    // persona prompt (_shared.md Shell Discipline); dispatched contexts historically
+    // arrived without them and were the permission-prompt offenders (2026-08-09).
+    public const string ShellDisciplinePreamble =
+        "SHELL RULES (mandatory): one command per Bash call — no ';', '&&', pipes, or " +
+        "shell variables/$-expansion; write literal absolute paths; prefer Read/Grep/Glob " +
+        "tools over cat/grep/find/ls; never 'cd' — use git -C / absolute paths. " +
+        "If you dispatch subagents, repeat these rules verbatim in their prompts.\n\n";
     public HuddleConfig Config => _config;
     public string DataDir => _dataDir;
     public IpcManager? Ipc { get; set; }
@@ -385,7 +400,7 @@ exit 0
         }
     }
 
-    public bool Start(string repoName, string? persona = null, bool continueSession = false, string? prompt = null)
+    public bool Start(string repoName, string? persona = null, bool continueSession = false, string? prompt = null, string? project = null)
     {
         repoName = ResolveRepoName(repoName);
         if (!_repos.TryGetValue(repoName, out var def))
@@ -421,6 +436,9 @@ exit 0
                 instance.SessionId = null;
                 instance.PersonaTempFiles.Clear();
                 instance.PersonaConfig = null;
+                // New run, new task (I010 F3): don't let a stale purpose linger.
+                instance.DeclaredPurpose = null;
+                instance.Project = null;
             }
         }
         else
@@ -441,6 +459,17 @@ exit 0
         {
         lock (instance.Lock)
         {
+            // I010 F3: remember what this session is FOR. The crash-recovery roster
+            // shows this instead of requiring transcript forensics. Dispatched prompts
+            // carry the shell-rules preamble (F5) — strip it so the purpose reads as
+            // the task, not the boilerplate.
+            if (!string.IsNullOrWhiteSpace(prompt))
+                instance.DeclaredPurpose = prompt.StartsWith(ShellDisciplinePreamble, StringComparison.Ordinal)
+                    ? prompt[ShellDisciplinePreamble.Length..]
+                    : prompt;
+            if (!string.IsNullOrWhiteSpace(project))
+                instance.Project = project;
+
             // Build system prompt — persona sessions get persona + base, others get base only.
             // The task `prompt` is NOT part of the system prompt; it goes in as the first
             // user turn so claude actually starts working without waiting for keystrokes.
@@ -854,7 +883,7 @@ exit 0
     /// <summary>
     /// Recover a session from persisted state — attach to an existing process by PID.
     /// </summary>
-    public bool Recover(string instanceId, string repoName, string? persona, Process proc, DateTime startedAt, Guid? sessionId = null)
+    public bool Recover(string instanceId, string repoName, string? persona, Process proc, DateTime startedAt, Guid? sessionId = null, string? declaredPurpose = null, string? project = null)
     {
         repoName = ResolveRepoName(repoName);
         if (!_repos.TryGetValue(repoName, out var def))
@@ -869,7 +898,9 @@ exit 0
             Status = SessionStatus.Running,
             StartedAt = startedAt,
             ActivePersona = persona,
-            SessionId = sessionId
+            SessionId = sessionId,
+            DeclaredPurpose = declaredPurpose,
+            Project = project
         };
 
         _instances[instanceId] = instance;

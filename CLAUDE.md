@@ -59,6 +59,10 @@ added complexity without changing how the operator actually worked. `budgetUsd` 
 
 ## Conventions
 
+- Projects: work belongs to `docs/projects/<slug>/` project dirs (project.md +
+  ROADMAP/BACKLOG/SPRINT/ISSUES). The repo layer is standalone truth;
+  `projects-map.json` beside huddle.json is the operator's overlay (notes/links).
+  See DESIGN.md "Projects: the Lens".
 - Simple, minimal code — no frameworks, no abstractions for one-time operations
 - Logging via Console.WriteLine with timestamps
 - Config via huddle.json (System.Text.Json deserialization)

@@ -47,6 +47,11 @@ Sessions run under a *gated* command allowlist — no unfettered access, but sim
 
 Interpreters (`python -c`, `node -e`, `pwsh -Command`) run arbitrary code and are **not** auto-allowed — they prompt. If you're reaching for one to parse or transform text, use Read/Grep/Glob, or write a small named script file and run that instead.
 
+4. **Dispatching a subagent or worker by ANY mechanism (Agent tool, dispatch-batch,
+   start-session)? Include rules 1–3 verbatim in its prompt.** Fresh contexts do not
+   inherit these rules; an uninstructed subagent WILL spam the operator with
+   permission prompts (proven live, 2026-08-09 — three prompts from audit agents).
+
 ## Standard Project Terminology
 
 Use these terms consistently across all projects:
@@ -55,7 +60,25 @@ Use these terms consistently across all projects:
 - **Backlog** — Specific things or ideas, planned or to be planned. Concrete work items that can be picked up, prioritized, and executed.
 - **Issues** — Bug list. Specific defects, broken behavior, things that need fixing. Not features, not ideas.
 
+- **Sprint** — What is in flight NOW. Sprints are identified `YYMM-N` (e.g. `2608-1`),
+  optionally correlated with a release version. The current sprint lives in `SPRINT.md`;
+  closed sprints archive to `sprints/<id>.md`.
+
 Do not conflate these. A roadmap item is not a backlog entry. A backlog entry is not an issue unless something is broken. An issue is not a roadmap item.
+
+## Projects
+
+Work belongs to **projects**: `docs/projects/<slug>/` in the project's primary repo,
+holding `project.md` (frontmatter: slug/title/goal/status/repos) plus the typed
+artifacts above (ROADMAP/BACKLOG/SPRINT/ISSUES as needed). The repo layer is
+standalone truth; huddle's `projects` / `project <slug>` verbs are the lens over it.
+
+- **Creating an artifact that belongs to a project? Declare it**: add `project: <slug>`
+  to the doc's frontmatter — that is how the lens finds it, wherever it lives.
+- **Dispatching work for a project?** Pass `"project": "<slug>"` in the dispatch-batch
+  task / start-session body — the stamp flows to the session, its claims, and the
+  crash-recovery roster.
+- Huddle never edits project files; agents own them like any other doc (claim first).
 
 ## Work Coordination — claims are MANDATORY, not advisory
 

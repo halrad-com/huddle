@@ -15,4 +15,5 @@ public record WorkUnit(
     IReadOnlyList<string> Files,
     IReadOnlyList<string> DependsOn,
     string? Objective = null,
-    string? Owner = null);
+    string? Owner = null,
+    string? Project = null);   // project slug (projects phase 1); null when unstamped

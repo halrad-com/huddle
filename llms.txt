@@ -25,6 +25,12 @@ The operator types these at the huddle `>` prompt. Run `help` for the live list.
 - `tasks` · `progress` · `conflicts` · `queue` — tracking, checkpoints, file-claim overlaps, dispatch-batch work queue (active/queued/done/failed)
 - `janitor` — report leaked session resources (uncleaned resource-ledger entries with live pids)
 - `docs [plans|churn]` — leveled document log (Docs deliverables / +Plans / +Churn git changes); `open <n>` opens an entry
+- `find <kw> [@repo] [-Nh|-Nd|-Nw]` — content search across docs, transcripts, scratchpads, mail
+- `history [@repo] [kw]` · `resume <instance|n>` — past sessions from transcripts; reopen one in its repo root
+- `backlog` — per-session queued wake lines + unread mail
+- `focus <instance>` — raise a session's console window
+- `recover [n|all|dismiss n]` — crash roster: dead sessions with declared purpose + last evidence, hubs first; relaunch show-and-pick
+- `projects [html [path]]` · `project <slug>` — the projects lens over `docs/projects/<slug>/` (repo layer = truth, `projects-map.json` = overlay); `projects html` writes the reproducible status page
 - `replay <repo>` — run the repo's captured regression tests via the configured runner (mbxhval host/port, or any CLI via per-repo `replayCommand`); runner: github.com/halrad-com/MBXHVAL
 - `shell [<repo>] <data>` — hand data to the OS file handler
 - `scan` · `ver` · `reload` · `quit` · `shutdown`

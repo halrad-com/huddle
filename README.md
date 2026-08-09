@@ -12,7 +12,7 @@ Windows-native. Offline. No cloud, no CDN, no external API at runtime. Each sess
 
 Three things in one binary:
 
-1. **A prompt tuner.** Each session is a repo + a persona — a markdown role file appended to Claude's system prompt that decides what the session is *for*. Shipped roles: `architect` · `reviewer` · `frontenddev` · `backenddev` · `documenter` · `versioner`. Each persona can pair its `.md` with an optional `.json` sidecar that pins model (Haiku/Sonnet/Opus), effort level, tool fence (e.g. architect literally cannot Edit), MCP whitelist, and plugin scope. Define repos once in `huddle.json`, then `start myapp architect` opens a Claude Code session in myapp under an architect persona; `start docs-site documenter` launches a documenter in docs-site. Personas are ordinary `.md` files in `personas/` — write your own.
+1. **A prompt tuner.** Each session is a repo + a persona — a markdown role file appended to Claude's system prompt that decides what the session is *for*. Shipped roles: `architect` · `reviewer` · `frontenddev` · `backenddev` · `documenter` · `versioner` · `researcher`. Each persona can pair its `.md` with an optional `.json` sidecar that pins model (Haiku/Sonnet/Opus), effort level, tool fence (e.g. architect literally cannot Edit), MCP whitelist, and plugin scope. Define repos once in `huddle.json`, then `start myapp architect` opens a Claude Code session in myapp under an architect persona; `start docs-site documenter` launches a documenter in docs-site. Personas are ordinary `.md` files in `personas/` — write your own.
 
 2. **A crash wrapper.** Claude Code runs on Bun, and Bun panics — it takes the whole console window with it when it does. Huddle runs each session in its own `conhost.exe` so a crash kills one window, not your workspace; optional auto-restart with escalating backoff brings it back via `--continue`. And recovery isn't just chat-history resume — sessions write a work-ledger entry (what they're on, which files they're touching) and timestamped scratchpad checkpoints as they go, so the restarted agent comes back with task-specific context, not just where it was in the conversation.
 
@@ -51,7 +51,7 @@ What you won't get from a terminal full of `claude` tabs:
 
 ## Why Huddle
 
-- **Crash protection that resumes, not just restarts.** Huddle began life as *seatbelt*, a crash wrapper for Claude Code sessions — your seatbelt against AI whiplash. It grew into something better: crashed sessions are isolated so they can't take anything else down, and the work ledger + scratchpad convention means a restarted agent picks up mid-task *with its context*. Watch a crash, type `restart`, and it carries on where it left off.
+- **Crash protection that resumes, not just restarts.** Huddle began life as *myapp*, a crash wrapper for Claude Code sessions — your myapp against AI whiplash. It grew into something better: crashed sessions are isolated so they can't take anything else down, and the work ledger + scratchpad convention means a restarted agent picks up mid-task *with its context*. Watch a crash, type `restart`, and it carries on where it left off.
 - **Human console AND agent-to-agent coordination — both, not either.** Most tools pick headless AI-to-AI or a human dashboard. Huddle is a human operator's console over a live inter-agent mail system.
 - **Fully auditable AI-to-AI communication.** Every message between agents is a JSON file on disk — inspectable, greppable, replayable. No opaque channels.
 - **Capture-to-test replay engine.** Agents freeze their verifications into regression suites as they work; `replay <repo>` re-runs the accumulated suite against a live instance. Verification becomes an asset, not an event.
@@ -270,6 +270,13 @@ Run `help` in huddle for the live version. Current commands:
 | `docs [plans\|logs]` | List documents sessions created, newest first. Default shows Docs (deliverables); `plans` adds Plans; `logs` adds git working-tree churn. See [Document log](#document-log). |
 | `open <n>` | Open the nth document from the last `docs` listing via the OS file handler. |
 | `find <kw> [@repo] [-Nh\|-Nd\|-Nw]` | Content search across doc bodies, session transcripts, scratchpads, and IPC mail — grouped hits, `open <n>` / `resume <n>` interop. |
+| `history [@repo] [kw] [-Nh\|-Nd\|-Nw]` | List past sessions from transcripts; `history <n>` for detail, `resume <n>` to reopen. |
+| `resume <instance\|n>` | Reopen a stopped session's conversation (`claude --resume`) in its repo root. Refuses live sessions. |
+| `backlog` | Per-session queued wake lines + unread mail, oldest first — who is sitting on what. |
+| `focus <instance>` | Raise a session's console window (handle captured at spawn). |
+| `recover [n\|all\|dismiss n]` | List sessions lost to a crash — persona, declared purpose, last evidence, hubs first — and relaunch them show-and-pick. Dismissals archive, never delete. |
+| `projects [html [path]]` | List projects discovered from `docs/projects/<slug>/` across repos (+ map overlay). `projects html` writes a self-contained status page — the reproducible output report. |
+| `project <slug>` | Project detail: goal, sprint, artifacts (wired into `open <n>`), live sessions, claims, recoverables. |
 | `replay <repo>` | Run the repo's captured regression tests (MBXHVAL capture suites) via `mbxhval`. See [Capture replay](#capture-replay). |
 | `scan` | Re-scan huddle's inbox for any commands the watcher missed. |
 | `ver` | Show huddle's version (branch, commit, build time). |
@@ -589,7 +596,7 @@ Everything is relative to the config file location. Drop `publish\huddle.exe` wh
 ## Where to Go Next
 
 - **`DESIGN.md`** — deep reference. Per-file breakdown of `src/`, IPC wire format, persona injection mechanics, claims lifecycle, auto-restart internals.
-- **`ROADMAP.md`** — history (seatbelt → huddle), what's shipped, v2 vision (WPF + stream-JSON), near-term direction.
+- **`ROADMAP.md`** — history (myapp → huddle), what's shipped, v2 vision (WPF + stream-JSON), near-term direction.
 - **`BACKLOG.md`** — planned work and known follow-ons. Phase 2 (runtime claim + yield-for-commit) and Phase 3 (worktree-per-session) live here.
 - **`ISSUES.md`** — bug list.
 - **`HUDDLE-COORDINATION-PROTOCOL.md`** — the check-out / check-in rules agents follow when editing shared files.

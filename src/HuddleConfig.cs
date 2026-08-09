@@ -107,6 +107,15 @@ public class HuddleConfig
     [JsonPropertyName("reclaimResourcesOnStop")]
     public bool ReclaimResourcesOnStop { get; set; }
 
+    /// <summary>
+    /// Seed each registered repo's .claude/settings.local.json with the standing
+    /// permission allow-set at startup (merge-only, backup before modify). Default
+    /// true — operator decision 2026-08-09 after repeated permission-prompt pain;
+    /// set false to manage allowlists by hand. (I010 F4)
+    /// </summary>
+    [JsonPropertyName("seedPermissions")]
+    public bool SeedPermissions { get; set; } = true;
+
     [JsonPropertyName("autoRestart")]
     public bool AutoRestart { get; set; }
 

@@ -14,9 +14,10 @@ public sealed record WorkLedgerClaim(
     DateTime ClaimedAt,     // UTC
     string BaseCommit,      // 40-char sha
     IReadOnlyList<string> Files,  // repo-relative paths
-    string OwnerGuid = ""   // owning session's conversation GUID; "" for legacy/unknown.
+    string OwnerGuid = "",  // owning session's conversation GUID; "" for legacy/unknown.
                             // Distinguishes the claiming INSTANCE from a later session
                             // that reuses the same name, so orphan reaping is precise.
+    string Project = ""     // project slug this claim serves; "" for legacy/unstamped.
 );
 
 /// <summary>
@@ -70,6 +71,9 @@ public class WorkLedgerClaims
         // still outside the files section (the files loop swallows any "- " line).
         if (!string.IsNullOrEmpty(claim.OwnerGuid))
             sb.AppendLine($"- **Owner:** {claim.OwnerGuid}");
+        // Project too must precede Files (the files loop swallows any "- " line).
+        if (!string.IsNullOrEmpty(claim.Project))
+            sb.AppendLine($"- **Project:** {claim.Project}");
         sb.AppendLine("- **Files:**");
         foreach (var file in claim.Files)
             sb.AppendLine($"  - {file}");
@@ -105,7 +109,7 @@ public class WorkLedgerClaims
         try
         {
             var lines = File.ReadAllLines(path);
-            string session = "", repo = "", batch = "", baseCommit = "", ownerGuid = "";
+            string session = "", repo = "", batch = "", baseCommit = "", ownerGuid = "", project = "";
             DateTime claimedAt = default;
             var files = new List<string>();
             var inFiles = false;
@@ -123,6 +127,7 @@ public class WorkLedgerClaims
                 }
                 else if (line.StartsWith("- **Base commit:**")) baseCommit = AfterColon(line);
                 else if (line.StartsWith("- **Owner:**")) ownerGuid = AfterColon(line);
+                else if (line.StartsWith("- **Project:**")) project = AfterColon(line);
                 else if (line.StartsWith("- **Files:**")) { inFiles = true; }
                 else if (inFiles && line.StartsWith("- "))
                 {
@@ -140,7 +145,7 @@ public class WorkLedgerClaims
                 return null;
             }
 
-            return new WorkLedgerClaim(session, repo, batch, claimedAt, baseCommit, files, ownerGuid);
+            return new WorkLedgerClaim(session, repo, batch, claimedAt, baseCommit, files, ownerGuid, project);
         }
         catch (Exception ex)
         {
@@ -175,7 +180,9 @@ public class WorkLedgerClaims
     {
         lock (_lock)
         {
-            var toRelease = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
+            // Path-normalized (same rule as conflict matching) so a claim written with
+            // one separator style can be released with the other.
+            var toRelease = new HashSet<string>(files.Select(NormPath), StringComparer.OrdinalIgnoreCase);
             int released = 0;
             foreach (var path in Directory.GetFiles(_claimsDir, "*.md"))
             {
@@ -183,7 +190,7 @@ public class WorkLedgerClaims
                 if (claim == null) continue;
                 if (!claim.SessionId.Equals(sessionId, StringComparison.OrdinalIgnoreCase)) continue;
 
-                var remaining = claim.Files.Where(f => !toRelease.Contains(f)).ToList();
+                var remaining = claim.Files.Where(f => !toRelease.Contains(NormPath(f))).ToList();
                 var matched = claim.Files.Count - remaining.Count;
                 released += matched;
 
@@ -286,8 +293,31 @@ public class WorkLedgerClaims
     }
 
     /// <summary>
-    /// Find overlaps: every pair of claims that share at least one file.
-    /// Used both for self-check within a proposed batch and for check-against-active.
+    /// Claim file paths are repo-relative, so two claims only collide when they are in
+    /// the SAME repo (I008: huddle README.md must not block corelib README.md).
+    /// Fail-safe: a claim with no repo recorded (legacy/malformed file) collides with
+    /// every repo — an old claim never silently loses its I005 protection.
+    /// </summary>
+    private static bool ReposCollide(string a, string b) =>
+        string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b) ||
+        a.Equals(b, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Normalize a repo-relative path for comparison: backslashes to forward slashes,
+    /// trimmed, leading "./" stripped — `src\a.cs`, `./src/a.cs`, and `src/a.cs` are
+    /// the same file and must collide (guardrail against separator-defeated conflicts).
+    /// </summary>
+    private static string NormPath(string f)
+    {
+        var p = f.Trim().Replace('\\', '/');
+        while (p.StartsWith("./", StringComparison.Ordinal)) p = p[2..];
+        return p;
+    }
+
+    /// <summary>
+    /// Find overlaps: every pair of SAME-REPO claims that share at least one file
+    /// (path-normalized). Used both for self-check within a proposed batch and for
+    /// check-against-active.
     /// </summary>
     public static List<ClaimOverlap> FindOverlaps(IReadOnlyList<WorkLedgerClaim> claims)
     {
@@ -295,11 +325,12 @@ public class WorkLedgerClaims
         for (int i = 0; i < claims.Count; i++)
         {
             var a = claims[i];
-            var aFiles = new HashSet<string>(a.Files, StringComparer.OrdinalIgnoreCase);
+            var aFiles = new HashSet<string>(a.Files.Select(NormPath), StringComparer.OrdinalIgnoreCase);
             for (int j = i + 1; j < claims.Count; j++)
             {
                 var b = claims[j];
-                var shared = b.Files.Where(f => aFiles.Contains(f)).ToList();
+                if (!ReposCollide(a.Repo, b.Repo)) continue;
+                var shared = b.Files.Where(f => aFiles.Contains(NormPath(f))).ToList();
                 if (shared.Count > 0)
                     overlaps.Add(new ClaimOverlap(a, b, shared));
             }
@@ -308,7 +339,8 @@ public class WorkLedgerClaims
     }
 
     /// <summary>
-    /// Find where any of the proposed claims overlap any of the existing active claims (held by a different session).
+    /// Find where any of the proposed claims overlap any of the existing active claims
+    /// (held by a different session, in the same repo — see <see cref="ReposCollide"/>).
     /// </summary>
     public static List<ClaimOverlap> FindConflictsWithActive(
         IReadOnlyList<WorkLedgerClaim> proposed,
@@ -317,12 +349,13 @@ public class WorkLedgerClaims
         var conflicts = new List<ClaimOverlap>();
         foreach (var p in proposed)
         {
-            var pFiles = new HashSet<string>(p.Files, StringComparer.OrdinalIgnoreCase);
+            var pFiles = new HashSet<string>(p.Files.Select(NormPath), StringComparer.OrdinalIgnoreCase);
             foreach (var a in active)
             {
                 if (a.SessionId.Equals(p.SessionId, StringComparison.OrdinalIgnoreCase))
                     continue; // same session can extend its own claim
-                var shared = a.Files.Where(f => pFiles.Contains(f)).ToList();
+                if (!ReposCollide(p.Repo, a.Repo)) continue;
+                var shared = a.Files.Where(f => pFiles.Contains(NormPath(f))).ToList();
                 if (shared.Count > 0)
                     conflicts.Add(new ClaimOverlap(p, a, shared));
             }
