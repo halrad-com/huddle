@@ -47,6 +47,11 @@ class Program
             return GitActivityMonitor.RunCredLog(args);
         }
 
+        // Enable VT processing so OSC 8 hyperlinks (docs/history listings) work when
+        // huddle runs under legacy conhost. When the console can't do VT, fall back
+        // to plain-text titles instead of spewing raw escape sequences.
+        ConsoleUI.HyperlinksEnabled = VtConsole.TryEnable();
+
         // Find config path
         var configPath = "huddle.json";
         for (int i = 0; i < args.Length - 1; i++)
@@ -272,6 +277,10 @@ class Program
         var recovered = SessionState.Recover(stateFile, manager, ipcManager, ConsoleUI.Log);
         if (recovered > 0)
             ConsoleUI.Log($"Recovered {recovered} session(s) from previous run.");
+
+        // Now that the live set is known, sweep claims stranded by dead/untracked instances
+        // (this is what makes "bounce huddle to reap dead-session claims" actually true).
+        orchestrator?.ReapOrphanClaims();
 
         // Auto-start repos (no persona for auto-start)
         foreach (var def in config.Sessions.Where(s => s.AutoStart))

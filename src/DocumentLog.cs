@@ -223,7 +223,7 @@ public sealed class ScratchpadDocumentSource : IDocumentSource
     /// huddle config contain no underscores, so split on the first underscore: left is
     /// the repo, the rejoined remainder (with ':' restored) is the display id.
     /// </summary>
-    private static (string repo, string display) SplitSafeName(string safeName)
+    public static (string repo, string display) SplitSafeName(string safeName)
     {
         var i = safeName.IndexOf('_');
         if (i <= 0) return (safeName, safeName);

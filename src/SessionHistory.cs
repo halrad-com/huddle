@@ -88,6 +88,12 @@ public class TranscriptStore
         return null;
     }
 
+    /// <summary>Transcript file paths, newest mtime first — for content scans (find verb).</summary>
+    public IEnumerable<string> TranscriptPaths() => EnumerateTranscriptsNewestFirst();
+
+    /// <summary>Parse one transcript by path. Find verb: parse cost is paid per HIT, not per scan.</summary>
+    public SessionDetail? ParsePath(string path) => ParseTranscript(path);
+
     private static bool Matches(SessionSummary s, string k) =>
         s.Title.Contains(k, StringComparison.OrdinalIgnoreCase) ||
         s.OpeningPrompt.Contains(k, StringComparison.OrdinalIgnoreCase) ||

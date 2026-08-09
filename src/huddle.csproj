@@ -11,6 +11,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <DebugType>embedded</DebugType>
     <Version>0.0.1</Version>
+    <ApplicationIcon>huddle.ico</ApplicationIcon>
   </PropertyGroup>
 
   <Target Name="StampGitInfo" BeforeTargets="GetAssemblyVersion;GetAssemblyAttributes">

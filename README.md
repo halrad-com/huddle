@@ -269,6 +269,7 @@ Run `help` in huddle for the live version. Current commands:
 | `queue` | Show the dispatch-batch work queue — active / queued (with what they wait on) / done / failed. |
 | `docs [plans\|logs]` | List documents sessions created, newest first. Default shows Docs (deliverables); `plans` adds Plans; `logs` adds git working-tree churn. See [Document log](#document-log). |
 | `open <n>` | Open the nth document from the last `docs` listing via the OS file handler. |
+| `find <kw> [@repo] [-Nh\|-Nd\|-Nw]` | Content search across doc bodies, session transcripts, scratchpads, and IPC mail — grouped hits, `open <n>` / `resume <n>` interop. |
 | `replay <repo>` | Run the repo's captured regression tests (MBXHVAL capture suites) via `mbxhval`. See [Capture replay](#capture-replay). |
 | `scan` | Re-scan huddle's inbox for any commands the watcher missed. |
 | `ver` | Show huddle's version (branch, commit, build time). |
@@ -548,7 +549,7 @@ What huddle can do is contain the blast: separate console per session (`UseShell
 ## Project Layout
 
 ```
-seatbelt/
+huddle/
   huddle.sln
   huddle.json              — session config (all repos)
   context.md               — auto-generated cross-session awareness

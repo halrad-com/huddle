@@ -877,7 +877,13 @@ public class Orchestrator : IDisposable
 
             var baseSha = GitHelper.GetHeadSha(repoDef.Root) ?? "";
             var claimId = $"R-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Interlocked.Increment(ref _runtimeClaimSeq)}";
-            var claim = new WorkLedgerClaim(msg.From, resolvedRepo, claimId, DateTime.UtcNow, baseSha, files);
+            // Normalize owner identity: store the canonical InstanceId (the exact form
+            // auto-release matches on) plus the owning conversation GUID, so a recycled
+            // name can't shield the claim and DeleteAllForSession never silently misses it.
+            var ownerInstance = ResolveOwner(msg.From);
+            var ownerId = ownerInstance?.InstanceId ?? msg.From;
+            var ownerGuid = ownerInstance?.SessionId?.ToString() ?? "";
+            var claim = new WorkLedgerClaim(ownerId, resolvedRepo, claimId, DateTime.UtcNow, baseSha, files, ownerGuid);
 
             if (_claims.TryClaim(claim, out var conflicts))
             {
@@ -924,14 +930,18 @@ public class Orchestrator : IDisposable
                 return;
             }
 
+            // Match claims by the SAME canonical identity HandleClaim stored under, so a
+            // release still finds a claim written under the normalized InstanceId form.
+            var owner = ResolveOwner(msg.From)?.InstanceId ?? msg.From;
+
             // Snapshot the session's claimed work-units before releasing so we can
             // tell which claim files fully disappear (= unit done) vs. shrink.
             var beforeUnits = _claims.ReadAll()
-                .Where(c => c.SessionId.Equals(msg.From, StringComparison.OrdinalIgnoreCase))
+                .Where(c => c.SessionId.Equals(owner, StringComparison.OrdinalIgnoreCase))
                 .Select(c => c.BatchId)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            var released = _claims.Release(msg.From, files);
+            var released = _claims.Release(owner, files);
             if (released == 0)
             {
                 _log($"Orchestrator: release from {msg.From} — no matching claim for {string.Join(", ", files)}");
@@ -943,7 +953,7 @@ public class Orchestrator : IDisposable
 
                 // A unit whose claim file is now gone (all its files released) is done.
                 var afterUnits = _claims.ReadAll()
-                    .Where(c => c.SessionId.Equals(msg.From, StringComparison.OrdinalIgnoreCase))
+                    .Where(c => c.SessionId.Equals(owner, StringComparison.OrdinalIgnoreCase))
                     .Select(c => c.BatchId)
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var doneUnits = beforeUnits.Where(b => !afterUnits.Contains(b)).ToList();
@@ -978,6 +988,52 @@ public class Orchestrator : IDisposable
         catch (Exception ex)
         {
             _log($"Orchestrator: auto-release error for {instance.InstanceId}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Resolve an IPC sender id (as an agent typed it) to its tracked instance. Handles a
+    /// direct InstanceId hit and the repo-alias colon form. Returns null when untracked.
+    /// </summary>
+    private SessionInstance? ResolveOwner(string from) =>
+        _manager.Instances.TryGetValue(from, out var direct) ? direct : _manager.ResolveInstance(from);
+
+    /// <summary>
+    /// Archive claims whose owning session instance is no longer live. Called after session
+    /// recovery at startup and on demand from the `conflicts` verb, so a stranded claim (dead
+    /// instance, or a name since reused by a new one) can never block a live claimant forever.
+    /// Guard: if recovery reports ZERO live instances we skip — an empty live set is
+    /// indistinguishable from recovery not having populated instances, and reaping then would
+    /// wrongly archive every live session's claims.
+    /// </summary>
+    public void ReapOrphanClaims()
+    {
+        try
+        {
+            var live = _manager.Instances.Values
+                .Where(i => i.IsAlive)
+                .Select(i => new WorkLedgerClaims.LiveInstance(i.InstanceId, i.SessionId, i.StartedAt))
+                .ToList();
+
+            if (live.Count == 0)
+            {
+                var present = _claims.ReadAll().Count;
+                if (present > 0)
+                    _log($"Orchestrator: {present} claim(s) present but 0 live instances — skipping orphan reap (run `conflicts` once sessions are up).");
+                return;
+            }
+
+            var reaped = _claims.ReapOrphans(live);
+            if (reaped.Count > 0)
+            {
+                _log($"Orchestrator: reaped {reaped.Count} orphan claim(s) — archived under claims/archived-orphan-*:");
+                foreach (var c in reaped)
+                    _log($"  - {c.SessionId} ({c.BatchId}): {string.Join(", ", c.Files)}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _log($"Orchestrator: orphan reap error: {ex.Message}");
         }
     }
 

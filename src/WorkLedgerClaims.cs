@@ -13,7 +13,10 @@ public sealed record WorkLedgerClaim(
     string BatchId,         // e.g. "B-20260421-231500"
     DateTime ClaimedAt,     // UTC
     string BaseCommit,      // 40-char sha
-    IReadOnlyList<string> Files  // repo-relative paths
+    IReadOnlyList<string> Files,  // repo-relative paths
+    string OwnerGuid = ""   // owning session's conversation GUID; "" for legacy/unknown.
+                            // Distinguishes the claiming INSTANCE from a later session
+                            // that reuses the same name, so orphan reaping is precise.
 );
 
 /// <summary>
@@ -63,6 +66,10 @@ public class WorkLedgerClaims
         sb.AppendLine($"- **Batch:** {claim.BatchId}");
         sb.AppendLine($"- **Claimed at:** {claim.ClaimedAt:yyyy-MM-ddTHH:mm:ssZ}");
         sb.AppendLine($"- **Base commit:** {claim.BaseCommit}");
+        // Owner GUID is written BEFORE the Files list so the parser reads it while
+        // still outside the files section (the files loop swallows any "- " line).
+        if (!string.IsNullOrEmpty(claim.OwnerGuid))
+            sb.AppendLine($"- **Owner:** {claim.OwnerGuid}");
         sb.AppendLine("- **Files:**");
         foreach (var file in claim.Files)
             sb.AppendLine($"  - {file}");
@@ -98,7 +105,7 @@ public class WorkLedgerClaims
         try
         {
             var lines = File.ReadAllLines(path);
-            string session = "", repo = "", batch = "", baseCommit = "";
+            string session = "", repo = "", batch = "", baseCommit = "", ownerGuid = "";
             DateTime claimedAt = default;
             var files = new List<string>();
             var inFiles = false;
@@ -115,6 +122,7 @@ public class WorkLedgerClaims
                     DateTime.TryParse(txt, null, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out claimedAt);
                 }
                 else if (line.StartsWith("- **Base commit:**")) baseCommit = AfterColon(line);
+                else if (line.StartsWith("- **Owner:**")) ownerGuid = AfterColon(line);
                 else if (line.StartsWith("- **Files:**")) { inFiles = true; }
                 else if (inFiles && line.StartsWith("- "))
                 {
@@ -132,7 +140,7 @@ public class WorkLedgerClaims
                 return null;
             }
 
-            return new WorkLedgerClaim(session, repo, batch, claimedAt, baseCommit, files);
+            return new WorkLedgerClaim(session, repo, batch, claimedAt, baseCommit, files, ownerGuid);
         }
         catch (Exception ex)
         {
@@ -209,6 +217,71 @@ public class WorkLedgerClaims
                 removed.Add(claim);
             }
             return removed;
+        }
+    }
+
+    /// <summary>
+    /// A live session as the reaper sees it: canonical instance id, its conversation GUID
+    /// (null for --continue sessions), and when it started. Passed in as plain data so the
+    /// reap decision stays a pure, unit-testable function with no SessionManager dependency.
+    /// </summary>
+    public readonly record struct LiveInstance(string InstanceId, Guid? Guid, DateTime? StartedAt);
+
+    /// <summary>
+    /// True when no currently-live session owns this claim — i.e. the claim is stranded and
+    /// safe to reap. Identity is the conversation GUID when the claim carries one: a match is
+    /// definitive and a recycled name cannot shield a dead instance. A legacy claim (no GUID)
+    /// falls back to name identity, but a live instance that started AFTER the claim is a
+    /// different instance reusing the name and does not own it. Name comparison is form-agnostic
+    /// (colon vs underscore) and case-insensitive.
+    /// </summary>
+    public static bool IsOrphan(WorkLedgerClaim claim, IReadOnlyList<LiveInstance> live)
+    {
+        if (Guid.TryParse(claim.OwnerGuid, out var g) && g != Guid.Empty)
+            return !live.Any(l => l.Guid == g);
+
+        // Legacy claim: match by name, but reject an instance that started after the claim.
+        var claimName = Safe(claim.SessionId);
+        foreach (var l in live)
+        {
+            if (!Safe(l.InstanceId).Equals(claimName, StringComparison.OrdinalIgnoreCase))
+                continue;
+            // Unknown start time → conservatively assume this live instance owns it (don't reap).
+            if (l.StartedAt is null || l.StartedAt.Value <= claim.ClaimedAt)
+                return false;
+        }
+        return true;
+
+        static string Safe(string id) => id.Replace(':', '_');
+    }
+
+    /// <summary>
+    /// Archive every claim whose owning instance is no longer live (see <see cref="IsOrphan"/>).
+    /// Orphans are MOVED into an "archived-orphan-yyyyMMdd" subdirectory of the claims dir —
+    /// reversible, auditable, and invisible to <see cref="ReadAll"/> (which is non-recursive) —
+    /// never hard-deleted. Returns the claims that were archived.
+    /// </summary>
+    public List<WorkLedgerClaim> ReapOrphans(IReadOnlyList<LiveInstance> live)
+    {
+        lock (_lock)
+        {
+            var archived = new List<WorkLedgerClaim>();
+            if (!Directory.Exists(_claimsDir)) return archived;
+
+            var archiveDir = Path.Combine(_claimsDir, $"archived-orphan-{DateTime.UtcNow:yyyyMMdd}");
+            foreach (var path in Directory.GetFiles(_claimsDir, "*.md"))
+            {
+                var claim = ReadFile(path);
+                if (claim == null || !IsOrphan(claim, live)) continue;
+
+                Directory.CreateDirectory(archiveDir);
+                var dest = Path.Combine(archiveDir, Path.GetFileName(path));
+                if (File.Exists(dest)) // near-impossible (unique claim ids); never overwrite/delete
+                    dest = Path.Combine(archiveDir, $"{Path.GetFileNameWithoutExtension(path)}-{DateTime.UtcNow.Ticks}.md");
+                File.Move(path, dest);
+                archived.Add(claim);
+            }
+            return archived;
         }
     }
 

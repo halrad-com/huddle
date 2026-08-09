@@ -48,6 +48,9 @@ public class ConsoleUI
     private IDocumentSource? _docSource;
     private readonly IDocumentOpener _docOpener = new ShellDocumentOpener();
     private List<DocumentEntry> _lastDocs = new();
+    // Active after a `find` run: translates shared display numbers to backing lists.
+    // Null whenever the last listing came from plain docs/history (legacy numbering).
+    private FindMap? _findMap;
     private int _docsPageOffset;                 // next entry index for `docs more`
     private const int DocsPageSize = 10;
 
@@ -211,6 +214,7 @@ public class ConsoleUI
             Console.WriteLine("  docs [plans|churn] [@repo] [kw] [-1d/-1w]  List docs; @repo, kw=folder/title, -Nd/-Nw=time window");
             Console.WriteLine("  open <n>                 Open the nth document from the last 'docs' listing");
             Console.WriteLine("  history [@repo] [kw] [-1d/-1w]  List past sessions from transcripts; 'history <n>' for detail, 'resume <n>' to reopen");
+            Console.WriteLine("  find <kw> [@repo] [-1d/-1w]  Content search: docs, sessions, notes, mail — 'open <n>' / 'resume <n>' on the results");
             Console.WriteLine("  direct <english task>    Hand a task to huddle:architect to plan + dispatch automatically");
             Console.WriteLine("  quit                     Exit huddle, sessions keep running");
             Console.WriteLine("  shutdown                 Stop all sessions and exit");
@@ -362,6 +366,10 @@ public class ConsoleUI
 
             case "history":
                 HandleHistory(arg);
+                break;
+
+            case "find":
+                HandleFind(arg);
                 break;
 
             case "personas" or "p":
@@ -758,6 +766,7 @@ public class ConsoleUI
     private void HandleDocs(string arg)
     {
         var a = arg.Trim();
+        // `docs ?` prints the key and lists nothing, so it leaves any find map alone.
         if (a.Equals("?", StringComparison.OrdinalIgnoreCase) || a.Equals("help", StringComparison.OrdinalIgnoreCase))
         {
             PrintDocsKey();
@@ -769,9 +778,11 @@ public class ConsoleUI
         {
             if (_lastDocs.Count == 0) { Log("No listing to continue — run 'docs' first."); return; }
             if (_docsPageOffset >= _lastDocs.Count) { Log("End of list — all entries shown. Use 'open <n>' to open one."); return; }
+            _findMap = null;                    // paging a plain listing → legacy numbering
             PrintDocsPage();
             return;
         }
+        _findMap = null;
 
         // Parse: optional leading level token; @repo, time-window, and keyword tokens in any order.
         var tokens = a.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
@@ -846,6 +857,183 @@ public class ConsoleUI
         if (keyword.Length > 0) summary += $" matching '{keyword}'";
         if (window != null) summary += $" in the last {window}";
         Log($"{summary}. Use 'open <n>' to open one.");
+    }
+
+    private const int FindGroupCap = 10;
+
+    private const string FindUsage =
+        "Usage: find <keyword> [@repo] [-Nh|-Nd|-Nw] — content search across docs, sessions, notes, mail";
+
+    private void HandleFind(string arg)
+    {
+        var a = arg.Trim();
+        // `find ?` must not run as a keyword — "?" matches almost every transcript line.
+        if (a.Equals("?", StringComparison.OrdinalIgnoreCase) || a.Equals("help", StringComparison.OrdinalIgnoreCase))
+        {
+            Log(FindUsage);
+            return;
+        }
+        DateTime? cutoff = null;
+        string? window = null, repoFilter = null;
+        var keywordParts = new List<string>();
+        foreach (var t in a.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (t.StartsWith('@') && t.Length > 1)
+            {
+                repoFilter = _manager.ResolveRepoName(t[1..].ToLowerInvariant());
+                continue;
+            }
+            var c = ParseWindow(t);
+            if (c.HasValue) { cutoff = c; window = t.TrimStart('-'); }
+            else keywordParts.Add(t);
+        }
+        var keyword = string.Join(' ', keywordParts).Trim();
+        if (keyword.Length == 0)
+        {
+            Log(FindUsage);
+            return;
+        }
+
+        var ipcDir = Ipc?.IpcDir
+            ?? Path.Combine(Directory.GetParent(_manager.DataDir)?.FullName ?? ".", "ipc");
+        var search = new ContentSearch(
+            DocSource, CreateTranscriptStore(), _manager.DataDir, ipcDir,
+            sid => _manager.Instances.Values.FirstOrDefault(i =>
+                i.IsAlive && i.SessionId.HasValue &&
+                string.Equals(i.SessionId.Value.ToString(), sid, StringComparison.OrdinalIgnoreCase))
+                ?.InstanceId,
+            Log);
+        var r = search.Search(keyword, repoFilter, cutoff);
+
+        var total = r.Docs.Count + r.Sessions.Count + r.Notes.Count + r.Mail.Count;
+        if (total == 0)
+        {
+            // No listing printed, so the previous one still stands: leave the map AND both
+            // backing lists alone. Nulling the map here would strand the earlier find's rows
+            // on screen under legacy numbering — `open 3` would open a different row.
+            var qual = new List<string> { $"for '{keyword}'" };
+            if (repoFilter != null) qual.Add($"in repo '{repoFilter}'");
+            if (window != null) qual.Add($"in the last {window}");
+            Log($"No hits {string.Join(" ", qual)}.");
+            return;
+        }
+
+        _lastDocs = new List<DocumentEntry>();
+        _lastHistory = new List<SessionSummary>();
+        _findMap = new FindMap();
+
+        PrintFindDocGroup("Docs", r.Docs);
+        PrintFindSessions(r.Sessions);
+        PrintFindDocGroup("Notes", r.Notes);
+        PrintFindMail(r.Mail);
+
+        // Everything a find puts in the backing lists is already on screen, so the paging
+        // cursors sit at the end: a following `docs more` / `history more` says so instead
+        // of re-printing find rows from a stale offset.
+        _docsPageOffset = _lastDocs.Count;
+        _historyPageOffset = _lastHistory.Count;
+
+        if (r.TranscriptsTruncated)
+            PrintDim($"  (newest {TranscriptStore.MaxScan} transcripts scanned)");
+        Log($"{total} hit(s) for '{keyword}'. 'open <n>' to open, 'resume <n>' to reopen a session.");
+    }
+
+    private void PrintDim(string text)
+    {
+        try
+        {
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine(text);
+        }
+        finally { Console.ResetColor(); }
+    }
+
+    // Docs and Notes groups share row shape: DocumentEntry into _lastDocs.
+    private void PrintFindDocGroup(string header, IReadOnlyList<DocumentEntry> entries)
+    {
+        if (entries.Count == 0) return;
+        Console.WriteLine();
+        PrintDim($"{header} ({entries.Count})");
+        foreach (var e in entries.Take(FindGroupCap))
+        {
+            var n = _findMap!.Add(FindMap.Kind.Doc, _lastDocs.Count);
+            _lastDocs.Add(e);
+            try
+            {
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.Write($"  {n,3}. ");
+                Console.ForegroundColor = e.Level == DocLevel.Plans ? ConsoleColor.Cyan : ConsoleColor.White;
+                Console.Write($"[{e.Level,-6}] ");
+                Console.Write(Hyperlink(e.Path, e.Title));
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                // Notes rows leave SourceSession empty (the title names the session already).
+                if (!string.IsNullOrEmpty(e.SourceSession)) Console.Write($"  {e.SourceSession}");
+                if (e.Note != null && e.Note != "auto") Console.Write($"  {e.Note}");
+                if (e.Timestamp.HasValue) Console.Write($"  {e.Timestamp:yyyy-MM-dd HH:mm}");
+                Console.WriteLine();
+            }
+            finally { Console.ResetColor(); }
+        }
+        if (entries.Count > FindGroupCap)
+            PrintDim($"  … {entries.Count - FindGroupCap} more — narrow with @repo, a keyword, or -Nw");
+    }
+
+    private void PrintFindSessions(IReadOnlyList<SessionHit> sessions)
+    {
+        if (sessions.Count == 0) return;
+        Console.WriteLine();
+        PrintDim($"Sessions ({sessions.Count})");
+        foreach (var h in sessions.Take(FindGroupCap))
+        {
+            var n = _findMap!.Add(FindMap.Kind.Session, _lastHistory.Count);
+            _lastHistory.Add(h.Summary);
+            try
+            {
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.Write($"  {n,3}. ");
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.Write($"[{h.Summary.Repo}]".PadRight(14));
+                Console.ForegroundColor = ConsoleColor.White;
+                Console.Write($" {h.Summary.Title,-50}");
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.Write($"  {FormatWhen(h.Summary.LastActivity)}  {h.MatchCount} match(es)");
+                Console.Write(h.LiveInstanceId != null
+                    ? $"  — LIVE, 'focus {h.LiveInstanceId}'"
+                    : $"  — 'resume {n}'");
+                Console.WriteLine();
+            }
+            finally { Console.ResetColor(); }
+        }
+        if (sessions.Count > FindGroupCap)
+            PrintDim($"  … {sessions.Count - FindGroupCap} more — narrow with @repo or -Nw");
+    }
+
+    private void PrintFindMail(IReadOnlyList<MailHit> mail)
+    {
+        if (mail.Count == 0) return;
+        Console.WriteLine();
+        PrintDim($"Mail ({mail.Count})");
+        foreach (var m in mail.Take(FindGroupCap))
+        {
+            var n = _findMap!.Add(FindMap.Kind.Doc, _lastDocs.Count);
+            _lastDocs.Add(new DocumentEntry(
+                Title: m.Subject, Path: m.Path, SourceSession: $"{m.From} → {m.To}",
+                Repo: "", Timestamp: m.Timestamp, Level: DocLevel.Output, Note: "mail"));
+            try
+            {
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.Write($"  {n,3}. ");
+                Console.ForegroundColor = ConsoleColor.White;
+                Console.Write($"{m.From} → {m.To}  ");
+                Console.Write(Hyperlink(m.Path, $"\"{m.Subject}\""));
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.Write($"  {m.Timestamp:yyyy-MM-dd HH:mm}  ({m.State})");
+                Console.WriteLine();
+            }
+            finally { Console.ResetColor(); }
+        }
+        if (mail.Count > FindGroupCap)
+            PrintDim($"  … {mail.Count - FindGroupCap} more — narrow with @repo or -Nw");
     }
 
     // Print the next page (DocsPageSize entries) of the last listing, newest first.
@@ -961,6 +1149,30 @@ public class ConsoleUI
     // `open <n>` — open the nth entry from the most recent `docs` listing.
     private void HandleOpen(string arg)
     {
+        if (_findMap != null)
+        {
+            if (!int.TryParse(arg.Trim(), out var fn) || _findMap.Resolve(fn) is not { } slot)
+            {
+                Log($"Usage: open <n>  (1..{_findMap.Count} of the find listing)");
+                return;
+            }
+            if (slot.kind == FindMap.Kind.Session)
+            {
+                Log($"{fn} is a session — use 'resume {fn}' (or 'history {fn}' for detail).");
+                return;
+            }
+            // Slot indexes are written alongside the backing list, so this holds by
+            // construction — checked anyway because the invariant spans five call sites.
+            if (slot.index >= _lastDocs.Count)
+            {
+                Log($"Usage: open <n>  (1..{_findMap.Count} of the find listing)");
+                return;
+            }
+            var found = _lastDocs[slot.index];
+            if (_docOpener.Open(found.Path, Log))
+                Log($"open: {found.Title} — {found.Path}");
+            return;
+        }
         if (_lastDocs.Count == 0)
         {
             Log("Nothing to open — run 'docs' first.");
@@ -1003,16 +1215,20 @@ public class ConsoleUI
         {
             if (_lastHistory.Count == 0) { Log("No listing to continue — run 'history' first."); return; }
             if (_historyPageOffset >= _lastHistory.Count) { Log("End of list — all sessions shown."); return; }
+            _findMap = null;                    // paging a plain listing → legacy numbering
             PrintHistoryPage();
             return;
         }
 
-        // `history <n>` — detail view for a row of the last listing.
+        // `history <n>` — detail view for a row of the last listing. This is the one route
+        // that must NOT clear the map: after a find, <n> is a shared display number and
+        // PrintHistoryDetail translates it. Every other route below builds a fresh listing.
         if (int.TryParse(a, out var idx))
         {
             PrintHistoryDetail(idx);
             return;
         }
+        _findMap = null;
 
         // Filters: @repo, -N{h,d,w}, remaining tokens = keyword (docs grammar).
         DateTime? cutoff = null;
@@ -1093,6 +1309,21 @@ public class ConsoleUI
 
     private void PrintHistoryDetail(int n)
     {
+        var displayN = n;                 // what the operator typed; a shared number under a find map
+        if (_findMap != null)
+        {
+            if (_findMap.Resolve(n) is not { } slot)
+            {
+                Log($"Usage: history <n>  (1..{_findMap.Count} of the find listing)");
+                return;
+            }
+            if (slot.kind == FindMap.Kind.Doc)
+            {
+                Log($"{n} is a document — use 'open {n}'.");
+                return;
+            }
+            n = slot.index + 1;   // fall through to the legacy body with the backing index
+        }
         if (_lastHistory.Count == 0) { Log("No listing — run 'history' first."); return; }
         if (n < 1 || n > _lastHistory.Count) { Log($"Usage: history <n>  (1..{_lastHistory.Count})"); return; }
 
@@ -1118,7 +1349,10 @@ public class ConsoleUI
                 Console.WriteLine();
                 Console.ForegroundColor = ConsoleColor.White;
                 Console.WriteLine($"  Files this session wrote ({detail.Files.Count}):");
-                // Load into _lastDocs so the existing `open <n>` works unchanged.
+                // Load into _lastDocs so the existing `open <n>` works unchanged. Replacing
+                // the list invalidates any find map — the numbers printed below are 1..N
+                // into the new list, so `open <n>` reverts to legacy numbering here.
+                _findMap = null;
                 _lastDocs = detail.Files.Select(f => new DocumentEntry(
                     Title: Path.GetFileName(f), Path: f, SourceSession: s.Id[..Math.Min(8, s.Id.Length)],
                     Repo: s.Repo, Timestamp: null, Level: DocLevel.Output, Note: "history")).ToList();
@@ -1139,7 +1373,10 @@ public class ConsoleUI
 
             Console.ForegroundColor = ConsoleColor.DarkGray;
             Console.WriteLine();
-            Console.WriteLine($"  → 'open <n>' to open a file · 'resume {n}' to reopen this conversation");
+            // With the map cleared above, resume takes the backing index; while it is still
+            // live, resume translates through it and wants the number the operator typed.
+            var resumeN = _findMap == null ? n : displayN;
+            Console.WriteLine($"  → 'open <n>' to open a file · 'resume {resumeN}' to reopen this conversation");
         }
         finally { Console.ResetColor(); }
         Console.WriteLine();
@@ -1147,6 +1384,29 @@ public class ConsoleUI
 
     private void HandleHistoryResume(int n)
     {
+        if (_findMap != null)
+        {
+            if (_findMap.Resolve(n) is not { } slot)
+            {
+                Log($"Usage: resume <n>  (1..{_findMap.Count} of the find listing)");
+                return;
+            }
+            if (slot.kind == FindMap.Kind.Doc)
+            {
+                Log($"{n} is a document — use 'open {n}'.");
+                return;
+            }
+            // Holds by construction (slots are written alongside _lastHistory); the guard
+            // keeps the invariant local rather than spread across the call sites.
+            if (slot.index >= _lastHistory.Count)
+            {
+                Log($"Usage: resume <n>  (1..{_findMap.Count} of the find listing)");
+                return;
+            }
+            var found = _lastHistory[slot.index];
+            _manager.ResumeTranscript(found.Id, found.Cwd);
+            return;
+        }
         if (_lastHistory.Count == 0) { Log("No listing — run 'history' first (resume <n> picks from it)."); return; }
         if (n < 1 || n > _lastHistory.Count) { Log($"Usage: resume <n>  (1..{_lastHistory.Count})"); return; }
         var s = _lastHistory[n - 1];
@@ -1165,12 +1425,19 @@ public class ConsoleUI
 
     private static string FormatStamp(DateTime? t) => t.HasValue ? $"{t:yyyy-MM-dd HH:mm}" : "?";
 
+    // Set once at startup (Program.Main) from VtConsole.TryEnable(). When the console
+    // can't process VT sequences (legacy conhost without VT, redirected output), the
+    // OSC 8 escapes would print as literal garbage — so Hyperlink() degrades to plain
+    // text and listings stay readable. `open <n>` still opens entries either way.
+    public static bool HyperlinksEnabled = true;
+
     // OSC 8 hyperlink escape sequence: ESC ]8;;URI ST  text  ESC ]8;; ST
     // Build the file URI with new Uri(...).AbsoluteUri — it percent-encodes spaces,
     // normalizes backslashes, and adds the drive letter. Do NOT string-concat
     // "file:///" + path: that breaks for any artifact path with a space or backslash.
     private static string Hyperlink(string path, string text)
     {
+        if (!HyperlinksEnabled) return text;
         string uri;
         try { uri = new Uri(path).AbsoluteUri; }
         catch { uri = path; }
@@ -1821,6 +2088,17 @@ public class ConsoleUI
         if (Directory.Exists(claimsDir))
         {
             var reader = new WorkLedgerClaims(claimsDir, Log);
+
+            // On-demand orphan sweep: archive claims whose owning instance is no longer
+            // live before reporting, so a stranded claim can't show up as a phantom holder.
+            var live = _manager.Instances.Values
+                .Where(i => i.IsAlive)
+                .Select(i => new WorkLedgerClaims.LiveInstance(i.InstanceId, i.SessionId, i.StartedAt))
+                .ToList();
+            var reaped = reader.ReapOrphans(live);
+            foreach (var c in reaped)
+                Log($"Reaped orphan claim {c.SessionId} ({c.BatchId}) — archived, was holding {string.Join(", ", c.Files)}");
+
             foreach (var claim in reader.ReadAll())
             {
                 var sessionSafe = claim.SessionId.Replace(':', '_');
