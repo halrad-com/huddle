@@ -52,6 +52,13 @@ public class ContextWriter
                             lines.Add($"- **Task:** {task}");
                         }
 
+                        // Project attribution — even "unknown" is worth knowing when a
+                        // task was dispatched without a stamp (2026-08-09 feedback).
+                        if (!string.IsNullOrEmpty(instance.Project))
+                            lines.Add($"- **Project:** {instance.Project}");
+                        else if (!string.IsNullOrWhiteSpace(instance.DeclaredPurpose))
+                            lines.Add($"- **Project:** (unstamped — dispatcher passed no project)");
+
                         var statusText = instance.Status switch
                         {
                             SessionStatus.Running => $"Running ({instance.FormatUptime()})",

@@ -15,6 +15,17 @@ History from before this file lives in the git commit log.
 
 ## 2026-08-09
 
+### 2026-08-09.6 — Spawn attribution: no window surprises the operator — (commit below)
+
+- Agent-spawned sessions announce loudly and attributed: `Orchestrator: <sender>
+  spawned <repo>:<persona> [project|no-project] — task: <snippet>` (start-session and
+  queue dispatch). `status` rows show `[project]` + a task snippet; a task-spawned
+  session missing its stamp shows `[no-project]` — absence is information, but only
+  where a stamp was expected (bare operator starts stay unadorned). `context.md` gains
+  a Project line, including an explicit "(unstamped)" marker for dispatched tasks.
+  Feedback source: myapp:frontenddev-2 appearing unannounced (WiiM charm v2
+  dispatch) — the session self-answered via the new Task line; the operator couldn't.
+
 ### 2026-08-09.5 — `projects html`: the reproducible status page — (commit below)
 
 - `projects html [path]` renders the lens to a self-contained HTML page (inline CSS,

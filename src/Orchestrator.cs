@@ -361,7 +361,16 @@ public class Orchestrator : IDisposable
             }
 
             var ok = _manager.Start(repo, persona, prompt: WithShellRules(prompt), project: project);
-            if (ok) SendAck(msg.From, msg.Subject, $"started {repo}");
+            if (ok)
+            {
+                // Attributed spawn announcement (2026-08-09 operator feedback: an
+                // agent-spawned window must never surprise the operator — say who,
+                // for which project, to do what).
+                _log($"Orchestrator: {msg.From} spawned {repo}:{persona ?? "(bare)"} " +
+                     $"[{(string.IsNullOrEmpty(project) ? "no-project" : project)}]" +
+                     $"{(Snippet(prompt) is { } t ? $" — task: {t}" : "")}");
+                SendAck(msg.From, msg.Subject, $"started {repo}");
+            }
             else SendNack(msg.From, msg.Subject, $"failed to start {repo}");
         }
         catch (Exception ex)
@@ -1062,6 +1071,14 @@ public class Orchestrator : IDisposable
     private static string? WithShellRules(string? prompt) =>
         string.IsNullOrWhiteSpace(prompt) ? prompt : SessionManager.ShellDisciplinePreamble + prompt;
 
+    // One-line task snippet for spawn announcements; null when there is no task.
+    private static string? Snippet(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return null;
+        var t = prompt.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return t.Length > 70 ? t[..70] + "…" : t;
+    }
+
     public void ReapOrphanClaims()
     {
         try
@@ -1175,7 +1192,9 @@ public class Orchestrator : IDisposable
             if (ok)
             {
                 _queue.MarkActive(u.Id);
-                _log($"queue: dispatched {u.Id} -> {sessionId}");
+                _log($"queue: dispatched {u.Id} -> {sessionId} " +
+                     $"[{(string.IsNullOrEmpty(u.Project) ? "no-project" : u.Project)}]" +
+                     $"{(Snippet(u.Prompt) is { } t ? $" — task: {t}" : "")}");
             }
             else
             {

@@ -150,6 +150,30 @@ public class ConsoleUI
                         Console.Write($"  [{instance.ActivePersona}]");
                     }
 
+                    // Project attribution + declared purpose: the operator should
+                    // never have to ask a window why it exists (2026-08-09 feedback).
+                    // Show what we KNOW; where a stamp was expected (the session has a
+                    // declared task) but absent, flag the gap — absence is information,
+                    // but only on task-spawned sessions, not casual bare starts.
+                    var hasTask = !string.IsNullOrWhiteSpace(instance.DeclaredPurpose);
+                    if (!string.IsNullOrEmpty(instance.Project))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.Write($"  [{instance.Project}]");
+                    }
+                    else if (hasTask)
+                    {
+                        Console.ForegroundColor = ConsoleColor.DarkGray;
+                        Console.Write("  [no-project]");
+                    }
+                    if (hasTask)
+                    {
+                        var task = instance.DeclaredPurpose!.Replace('\r', ' ').Replace('\n', ' ');
+                        if (task.Length > 48) task = task[..48] + "…";
+                        Console.ForegroundColor = ConsoleColor.DarkGray;
+                        Console.Write($"  {task}");
+                    }
+
                     // Reflect agent trouble from the session's transcript: a current
                     // API error (500/529/rate-limit) is called out in red; otherwise a
                     // long idle gap (transcript not growing) is noted plainly — it can't
