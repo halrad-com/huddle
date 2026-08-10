@@ -1,0 +1,21 @@
+<!-- Huddle icons: drop these files at the web root and paste this into <head> -->
+
+<link rel="icon" href="/favicon.ico" sizes="16x16 24x24 32x32 48x48">
+<link rel="icon" href="/huddle.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+
+<!--
+Notes:
+  favicon.ico          multi-resolution, still the most reliable fallback
+  huddle.svg           modern browsers prefer this; scales to any size
+  apple-touch-icon.png 180x180, deliberately flattened onto white -
+                       iOS composites transparency to black, so it must be opaque
+  icon-192 / icon-512  referenced from site.webmanifest, transparent
+
+The manifest intentionally has no "purpose": "maskable" entry. A maskable
+icon is cropped to a circle/squircle by the OS and must fill the frame with
+an opaque background, which conflicts with a transparent mark-only icon.
+If you want one, say so and I'll add a tiled variant with the mark inside
+the 80% safe zone.
+-->

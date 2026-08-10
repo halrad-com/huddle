@@ -15,6 +15,23 @@ History from before this file lives in the git commit log.
 
 ## 2026-08-09
 
+### 2026-08-09.8 — Official icon kit lands — (commit below)
+
+- Operator-supplied huddle mark (seven-dot ring, small-size five-dot variant,
+  transparent) replaces the generated placeholder. Full kit checked in at
+  `assets/icon/` — SVG masters, PNG ladder 16..1024, windows .ico, web favicon set
+  (manifest + head snippet), and `gen.py` (Pillow) that regenerates every asset from
+  one geometry. `src/huddle.ico` (the exe embed) now carries the official 9-frame ico.
+
+### 2026-08-09.7 — Console window actually shows huddle's icon — (commit below)
+
+- The `ApplicationIcon` embed (2026-08-08.2) covers Explorer/shortcuts only — the live
+  console window belongs to conhost, which keeps its generic icon unless the app sends
+  `WM_SETICON`. `ConsoleIcon.TrySet()` extracts the embedded icon from huddle.exe at
+  startup and sets both window icon sizes. Best-effort (Windows Terminal tabs manage
+  their own icons; dotnet-run has no .exe to extract from); cosmetic failures never
+  block startup.
+
 ### 2026-08-09.6 — Spawn attribution: no window surprises the operator — (commit below)
 
 - Agent-spawned sessions announce loudly and attributed: `Orchestrator: <sender>

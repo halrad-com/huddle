@@ -52,6 +52,10 @@ class Program
         // to plain-text titles instead of spewing raw escape sequences.
         ConsoleUI.HyperlinksEnabled = VtConsole.TryEnable();
 
+        // Put huddle's own icon on the console window + taskbar — the embedded
+        // ApplicationIcon covers Explorer only; the live window needs WM_SETICON.
+        ConsoleIcon.TrySet();
+
         // Find config path
         var configPath = "huddle.json";
         for (int i = 0; i < args.Length - 1; i++)
