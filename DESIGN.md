@@ -882,7 +882,7 @@ run it from the repo root or use `--config` to point at the config.
 | `messages <instance>` | Read messages in a session's inbox. Shows sender, type, subject, and body. | `messages app:architect` |
 | `delegate "desc" to <instance>` | Delegate a task to a session. Creates a tracked task, sends it via IPC, and auto-starts the session if it's not running. | `delegate "fix login bug" to app:backenddev` |
 | `direct <english task>` | Hand a free-form task to `huddle:architect` with `autoFire: true`. Architect plans and dispatches via `dispatch-batch` without a confirmation step. | `direct clean up the auth flow` |
-| `broadcast <subject> <msg>` | Fan out an informational message to every live session. Orchestrator refuses command-type broadcasts. | `broadcast heads-up merge window in 30 min` |
+| `broadcast [@repo] <message>` | Fan out an informational message to every live session (optionally scoped to one or more repos). The subject is derived from the message. Orchestrator refuses command-type broadcasts. | `broadcast heads-up merge window in 30 min` |
 | `shell [<repo>] <data>` | Hand `<data>` to the OS shell (`ShellExecute`) — opens files, URLs, folders. Optional repo sets working directory. Fire-and-forget. | `shell app deploy\\build.cmd` |
 | `tasks` | Show all tracked tasks with state (pending, delegated, in-progress, completed, failed), assignee, and description. | `tasks` |
 | `progress` | Show the last scratchpad checkpoint for each running session. Sessions write checkpoints to `logs/<name>/scratchpad.md` as they work. | `progress` |

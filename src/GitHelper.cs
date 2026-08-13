@@ -93,6 +93,56 @@ public static class GitHelper
         return null;
     }
 
+    /// <summary>
+    /// Raw <c>git worktree list --porcelain</c> output for the repo containing
+    /// <paramref name="dir"/>, or "" on failure. Parsed by
+    /// <see cref="GitWorktrees.ParsePorcelain"/>.
+    /// </summary>
+    public static string WorktreeListPorcelain(string dir)
+    {
+        var (ok, stdout, _) = Run(dir, "worktree list --porcelain");
+        return ok ? stdout : "";
+    }
+
+    /// <summary>
+    /// Subject and committer-date of the most recent commit that touched
+    /// <paramref name="dir"/> (scoped to that path). Either field is null when
+    /// unavailable (not a repo, no commits, git failure).
+    /// </summary>
+    public static (string? subject, DateTime? when) LastCommitTouching(string dir)
+    {
+        // %x1f = unit separator between subject and strict-ISO committer date.
+        var (ok, stdout, _) = Run(dir, "log -1 --format=%s%x1f%cI -- .");
+        if (!ok) return (null, null);
+        var line = stdout.Trim();
+        if (line.Length == 0) return (null, null);
+        var parts = line.Split('\x1f');
+        DateTime? when = null;
+        if (parts.Length > 1 && DateTimeOffset.TryParse(parts[1].Trim(), out var dto))
+            when = dto.LocalDateTime;
+        return (parts[0].Trim(), when);
+    }
+
+    /// <summary>
+    /// Number of commits touching <paramref name="dir"/> since <paramref name="since"/>
+    /// (a git approxidate, e.g. "30.days"). 0 on any failure.
+    /// </summary>
+    public static int CommitsSince(string dir, string since)
+    {
+        var (ok, stdout, _) = Run(dir, $"rev-list --count --since={since} HEAD -- .");
+        if (!ok) return 0;
+        return int.TryParse(stdout.Trim(), out var n) ? n : 0;
+    }
+
+    /// <summary>Current branch name for <paramref name="dir"/>, or null (detached / failure).</summary>
+    public static string? CurrentBranch(string dir)
+    {
+        var (ok, stdout, _) = Run(dir, "rev-parse --abbrev-ref HEAD");
+        if (!ok) return null;
+        var b = stdout.Trim();
+        return b.Length == 0 || b == "HEAD" ? null : b;
+    }
+
     private static (bool ok, string stdout, string stderr) Run(string repoRoot, string args)
     {
         try

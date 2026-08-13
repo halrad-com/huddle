@@ -47,6 +47,15 @@ class Program
             return GitActivityMonitor.RunCredLog(args);
         }
 
+        // Headless projects-report mode: render the projects status page from registered
+        // repo data (worktree-aware) and exit. No orchestrator, watchers, or singleton —
+        // the reproducible output demo, made scriptable (scripts/demo-project-status.ps1,
+        // CI). Usage: huddle --projects-html <out.html> [--config <path>]
+        if (args.Length >= 2 && args[0] == "--projects-html")
+        {
+            return RunProjectsHtml(args);
+        }
+
         // Enable VT processing so OSC 8 hyperlinks (docs/history listings) work when
         // huddle runs under legacy conhost. When the console can't do VT, fall back
         // to plain-text titles instead of spewing raw escape sequences.
@@ -345,13 +354,33 @@ class Program
                 || answer.Equals("yes", StringComparison.OrdinalIgnoreCase);
         }
 
-        // Command loop
+        // Command loop. One editor for the whole loop so history persists across
+        // commands. The completer reads live state per keystroke: instance names
+        // for say/stop/focus/..., repo names for start/replay/@-scopes, personas
+        // for start's second argument — plus the verb's arg grammar as a dim hint
+        // when nothing has been typed after the verb yet.
+        var argCompleter = new ArgCompleter(new ArgProviders
+        {
+            LiveInstances = () => manager.Instances
+                .Where(kv => kv.Value.IsAlive).Select(kv => kv.Key)
+                .OrderBy(k => k, StringComparer.Ordinal).ToArray(),
+            StoppedInstances = () => manager.Instances
+                .Where(kv => !kv.Value.IsAlive).Select(kv => kv.Key)
+                .OrderBy(k => k, StringComparer.Ordinal).ToArray(),
+            Repos = () => manager.Repos.Keys
+                .OrderBy(k => k, StringComparer.Ordinal).ToArray(),
+            Personas = () => manager.GetAvailablePersonas(),
+        });
+        var lineEditor = new LineEditor(argCompleter);
         var stopAll = false;
         while (true)
         {
-            ui.PrintPrompt();
-
-            var line = Console.ReadLine();
+            // Redirected stdin (scripts, pipes, headless) has no interactive console:
+            // Console.KeyAvailable throws there, so fall back to plain ReadLine and skip
+            // the prompt entirely. The interactive branch paints its own "> " prompt.
+            var line = Console.IsInputRedirected
+                ? Console.ReadLine()
+                : lineEditor.ReadLine("> ", () => ctrlCPressed);
 
             // Ctrl+C or EOF: both tear down every session. Record which trigger fired,
             // confirm, then log the decision — so an abnormal teardown is never a mystery.
@@ -416,5 +445,42 @@ class Program
         ConsoleUI.Log("Goodbye.");
 
         return 0;
+    }
+
+    // Render docs/projects/<slug> across registered repos AND their git worktrees to a
+    // self-contained HTML page, then exit. Agents/claims are live-orchestrator data, so
+    // they are empty here — this path proves projects + worktree discovery, not the
+    // running fleet. Any failure returns non-zero with a stderr line.
+    private static int RunProjectsHtml(string[] args)
+    {
+        var outPath = Path.GetFullPath(args[1]);
+        var configPath = "huddle.json";
+        for (int i = 2; i < args.Length - 1; i++)
+            if (args[i] is "--config" or "-c") { configPath = args[i + 1]; break; }
+
+        HuddleConfig config;
+        try { config = HuddleConfig.Load(configPath); }
+        catch (Exception ex) { Console.Error.WriteLine($"--projects-html: config load failed: {ex.Message}"); return 1; }
+
+        // projects-map.json overlay beside the config is optional.
+        string? mapJson = null;
+        var mapPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(configPath)) ?? ".", "projects-map.json");
+        try { if (File.Exists(mapPath)) mapJson = File.ReadAllText(mapPath); } catch { /* overlay optional */ }
+
+        var projects = ProjectMap.Discover(
+            config.Sessions.Select(s => (s.Name, s.Root)), mapJson, m => Console.Error.WriteLine(m));
+        var entries = projects
+            .Select(p => new ProjectReportEntry(p, Array.Empty<ProjectAgent>(), Array.Empty<WorkLedgerClaim>()))
+            .ToList();
+
+        try
+        {
+            var dir = Path.GetDirectoryName(outPath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllText(outPath, ProjectReport.Render(entries, $"huddle {BuildInfo.Short}"));
+            Console.WriteLine($"projects: wrote {entries.Count} project(s) -> {outPath}");
+            return 0;
+        }
+        catch (Exception ex) { Console.Error.WriteLine($"--projects-html: write failed: {ex.Message}"); return 1; }
     }
 }

@@ -116,10 +116,17 @@ public class IpcManager : IDisposable
     // tails them so a session blocked on a GitHub auth prompt is surfaced.
     public string GitAuthDir => Path.Combine(_ipcDir, "gitauth");
 
+    // Durable handoff ledger (logs/handoffs.jsonl, sibling of the ipc dir). A `handoff`
+    // mail is recorded here and announced live; the `handoffs` verb reads it back.
+    private readonly HandoffLedger _handoffs;
+    public HandoffLedger Handoffs => _handoffs;
+
     public IpcManager(string ipcDir, Action<string> log)
     {
         _ipcDir = ipcDir;
         _log = log;
+        _handoffs = new HandoffLedger(Path.Combine(
+            Path.GetDirectoryName(Path.GetFullPath(ipcDir)) ?? ".", "logs", "handoffs.jsonl"));
         Directory.CreateDirectory(ipcDir);
         Directory.CreateDirectory(WorkLedgerDir);
         Directory.CreateDirectory(ClaimsDir);
@@ -367,6 +374,13 @@ public class IpcManager : IDisposable
         }
         if (!quiet) _log($"IPC [{instanceId}] from {msg.From}: {msg.Subject}");
 
+        // A handoff mail is recorded + announced the moment it lands, regardless of
+        // whether the recipient is live — the push that makes handoffs visible without
+        // the operator asking. Idempotent by mail filename, so a re-processed inbox file
+        // (handoff to a not-yet-live session) never double-announces.
+        if (string.Equals(msg.Type, "handoff", StringComparison.OrdinalIgnoreCase))
+            RecordHandoff(msg, name);
+
         // Internal sender already handled the nudge (broadcast fan-out,
         // orchestrator ack/nack reply) and the body content is structured
         // for the orchestrator's own bookkeeping, not for an agent to read
@@ -392,6 +406,26 @@ public class IpcManager : IDisposable
         if (delivered && safe.Length > 0)
             MarkAnnounced(safe, name);
         // Not delivered: nothing recorded — retried on the next scan / session start.
+    }
+
+    // Record a handoff mail to the ledger and, if it's new, announce it in the console:
+    //   [handoff] <from> -> <to>: <task> (<state>)
+    private void RecordHandoff(IpcMessage msg, string sourceName)
+    {
+        try
+        {
+            JsonElement body;
+            try { body = msg.BodyObject; } catch { body = default; }
+            var (to, task, state) = HandoffLedger.ParseBody(body, msg.To, msg.Subject);
+            var from = string.IsNullOrWhiteSpace(msg.From) ? "?" : msg.From;
+            if (_handoffs.Record(new HandoffEntry(DateTime.Now, from, to, task, state, sourceName)))
+            {
+                var tail = string.IsNullOrWhiteSpace(state)
+                    ? "" : $" ({(state!.Length > 80 ? state[..80] + "…" : state)})";
+                _log($"[handoff] {from} -> {to}: {task}{tail}");
+            }
+        }
+        catch (Exception ex) { _log($"IPC: handoff record failed: {ex.Message}"); }
     }
 
     // One shared entry point for reading agent-authored IPC JSON: strict parse,

@@ -667,7 +667,12 @@ public class Orchestrator : IDisposable
                 ? bodyText.Substring(0, NudgeBodyCap) + "... (truncated; full in inbox)"
                 : bodyText;
             nudgeBody = nudgeBody.Replace("\r\n", " ").Replace("\r", " ").Replace("\n", " ");
-            var nudge = $"[huddle broadcast from {msg.From}] {subject}: {nudgeBody}";
+            // Console broadcasts derive their subject from the message itself, so
+            // "{subject}: {body}" would stutter ("hello: hello"). Drop the subject
+            // segment whenever it is just a prefix of the body — it adds nothing.
+            var nudge = nudgeBody.StartsWith(subject, StringComparison.Ordinal)
+                ? $"[huddle broadcast from {msg.From}] {nudgeBody}"
+                : $"[huddle broadcast from {msg.From}] {subject}: {nudgeBody}";
 
             // Fan out — fire-and-forget per target. `delivered` counts mail
             // files written (audit trail); `injected` counts consoles actually

@@ -233,6 +233,21 @@ Do NOT call `ScheduleWakeup` for inbox polling — the orchestrator delivers liv
 
 Broadcast triggers arrive the same way — treat them as ordinary mail.
 
+**Handing off work — say it in a `handoff` mail, not just prose.** When you hand a task to
+another agent, send mail with `"type": "handoff"` and a body naming the target, the task,
+and where it got to:
+
+```json
+{"from":"<you>","to":"<target>","timestamp":"<ISO-8601-UTC>","type":"handoff",
+ "subject":"<short task>",
+ "body":{"to":"<target>","task":"<what>","state":"<where it got to / what's left>"}}
+```
+
+Write it into the target's inbox (`ipc/<target-safe-name>/inbox/`) like any mail — it both
+nudges them AND is recorded. Saying "I handed it off" in your console is invisible to the
+operator; the `handoff` mail is what huddle announces the moment it lands (`[handoff] you
+-> target: task`) and lists under the `handoffs` verb. Every real handoff gets one.
+
 ## Commit-Then-Release (for claimed file work)
 
 When you are working on files that the orchestrator has claimed on your behalf (via a `dispatch-batch`), follow this idiom at each logical unit of work:

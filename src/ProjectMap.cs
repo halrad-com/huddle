@@ -14,7 +14,8 @@ public sealed record ProjectInfo(
     string? SprintId, string? SprintVersion,
     IReadOnlyList<string> TypedArtifacts,
     string? MapNotes, IReadOnlyList<string> MapLinks, bool MapOnly,
-    string? Warning);
+    string? Warning,
+    DerivedSummary? Derived = null);
 
 /// <summary>
 /// Discovers docs/projects/&lt;slug&gt;/project.md across registered repos and merges
@@ -63,10 +64,22 @@ public static class ProjectMap
     public static List<ProjectInfo> Discover(
         IEnumerable<(string Name, string Root)> repos, string? mapJson, Action<string> log)
     {
+        var repoList = repos.ToList();
+        var repoRoots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, root) in repoList) repoRoots[name] = root;
+
         var overlay = ParseOverlay(mapJson, log);
         var bySlug = new Dictionary<string, ProjectInfo>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var (repoName, root) in repos)
+        // Expand each registered repo to its git worktrees (main first) so a project
+        // authored on a feature branch — which lives only in a linked worktree until it
+        // merges — is discovered pre-merge and stays discovered after. Main-canonical:
+        // the same slug found in this repo's OWN main + linked worktrees is deduped
+        // silently (see the conflict branch below), only genuine cross-repo clashes warn.
+        var expanded = repoList.SelectMany(
+            r => GitWorktrees.ForRepo(r.Root).Select(wt => (r.Name, wt.Root)));
+
+        foreach (var (repoName, root) in expanded)
         {
             var projectsDir = Path.Combine(root, "docs", "projects");
             IEnumerable<string> dirs;
@@ -94,7 +107,11 @@ public static class ProjectMap
 
                 if (bySlug.TryGetValue(slug, out var existing))
                 {
-                    // Conflict: first repo (registration order) wins, loudly.
+                    // Same registered repo's own other worktree (same slug on main +
+                    // a feature branch): main-canonical, deduped SILENTLY — not a clash.
+                    if (string.Equals(existing.HomeRepo, repoName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    // Genuine cross-repo clash: first repo (registration order) wins, loudly.
                     bySlug[slug] = existing with
                     {
                         Warning = $"slug '{slug}' also declared by repo '{repoName}' ({docPath}) — using {existing.HomeRepo}'s"
@@ -138,25 +155,59 @@ public static class ProjectMap
             }
         }
 
-        // Overlay merge: annotate discovered projects; unknown slugs become MapOnly
-        // entries (the doc hasn't been written yet — visible, not an error).
-        foreach (var (slug, (notes, links)) in overlay)
+        // Overlay merge: annotate discovered projects and derive a summary from the
+        // `source` pointer when given. A slug with a source but no project.md is a
+        // DERIVED project (rich, not a bare map-only stub); a slug with neither stays
+        // map-only (the doc hasn't been written yet — visible, not an error).
+        foreach (var (slug, (notes, links, source, status)) in overlay)
         {
+            var derived = string.IsNullOrWhiteSpace(source) ? null : ProjectDeriver.Derive(source!, repoRoots, log);
+
             if (bySlug.TryGetValue(slug, out var p))
-                bySlug[slug] = p with { MapNotes = notes, MapLinks = links };
+                // Operator-set overlay status overrides where given; otherwise the repo doc's status stands.
+                bySlug[slug] = p with
+                {
+                    MapNotes = notes, MapLinks = links, Derived = derived,
+                    Status = string.IsNullOrWhiteSpace(status) ? p.Status : status!
+                };
             else
-                bySlug[slug] = new ProjectInfo(slug, slug, "", "",
-                    Array.Empty<string>(), "", "", null, null,
-                    Array.Empty<string>(), notes, links, MapOnly: true, Warning: null);
+                bySlug[slug] = new ProjectInfo(
+                    Slug: slug, Title: slug, Goal: "", Status: status ?? "",
+                    Repos: derived != null ? new[] { derived.Repo } : Array.Empty<string>(),
+                    HomeRepo: derived?.Repo ?? "", Dir: "",
+                    SprintId: null, SprintVersion: null,
+                    TypedArtifacts: Array.Empty<string>(),
+                    MapNotes: notes, MapLinks: links,
+                    MapOnly: derived == null,       // a derived entry is not a bare stub
+                    Warning: null, Derived: derived);
         }
 
-        return bySlug.Values.OrderBy(p => p.Slug, StringComparer.OrdinalIgnoreCase).ToList();
+        // Sort by status tier (operator's order): active on top, then research, then
+        // released, then unknown, with EOL/legacy sinking to the bottom; slug breaks ties.
+        return bySlug.Values
+            .OrderBy(p => StatusRank(p.Status))
+            .ThenBy(p => p.Slug, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
-    private static Dictionary<string, (string? Notes, IReadOnlyList<string> Links)> ParseOverlay(
+    /// <summary>
+    /// Status-tier rank for sorting (lower = higher on the page). Matches on substrings so
+    /// "EOL : Legacy", "Released 1.2", etc. all land in the right tier.
+    /// </summary>
+    public static int StatusRank(string? status)
+    {
+        var s = (status ?? "").Trim().ToLowerInvariant();
+        if (s.Contains("eol") || s.Contains("legacy")) return 4;   // bottom
+        if (s.StartsWith("active")) return 0;                       // top
+        if (s.StartsWith("research")) return 1;
+        if (s.StartsWith("release") || s.StartsWith("shipped")) return 2;
+        return 3;                                                   // unknown/other: above EOL
+    }
+
+    private static Dictionary<string, (string? Notes, IReadOnlyList<string> Links, string? Source, string? Status)> ParseOverlay(
         string? mapJson, Action<string> log)
     {
-        var result = new Dictionary<string, (string?, IReadOnlyList<string>)>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, (string?, IReadOnlyList<string>, string?, string?)>(StringComparer.OrdinalIgnoreCase);
         if (string.IsNullOrWhiteSpace(mapJson))
             return result;
         try
@@ -164,18 +215,24 @@ public static class ProjectMap
             using var doc = JsonDocument.Parse(mapJson);
             foreach (var prop in doc.RootElement.EnumerateObject())
             {
-                string? notes = null;
+                string? notes = null, source = null, status = null;
                 var links = new List<string>();
                 if (prop.Value.ValueKind == JsonValueKind.Object)
                 {
                     if (prop.Value.TryGetProperty("notes", out var n) && n.ValueKind == JsonValueKind.String)
                         notes = n.GetString();
+                    // `source` = "repo[/subpath][@branch]" — the pointer huddle derives from.
+                    if (prop.Value.TryGetProperty("source", out var sc) && sc.ValueKind == JsonValueKind.String)
+                        source = sc.GetString();
+                    // `status` — operator-set project status (drives the pill + status-tier sort).
+                    if (prop.Value.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String)
+                        status = st.GetString();
                     if (prop.Value.TryGetProperty("links", out var l) && l.ValueKind == JsonValueKind.Array)
                         foreach (var item in l.EnumerateArray())
                             if (item.ValueKind == JsonValueKind.String)
                                 links.Add(item.GetString()!);
                 }
-                result[prop.Name] = (notes, links);
+                result[prop.Name] = (notes, links, source, status);
             }
         }
         catch (Exception ex)

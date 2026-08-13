@@ -155,7 +155,12 @@ public sealed class ScratchpadDocumentSource : IDocumentSource
                 continue;
             }
             if (!inSection) continue;
-            if (trimmed.StartsWith("##")) yield break;          // next heading ends the section
+            // A heading ends the CURRENT section but not the scan — a scratchpad
+            // accumulates one `## Documents` section per checkpoint, and every one of
+            // them must be read (the old `yield break` stopped at the first, so any doc
+            // declared in a later section was silently invisible). The next
+            // `## Documents` re-enters via the check above.
+            if (trimmed.StartsWith("##")) { inSection = false; continue; }
             if (!trimmed.StartsWith("- ")) continue;
 
             var link = LinkRx.Match(trimmed);
@@ -345,37 +350,61 @@ public sealed class FilesystemDocSource : IDocumentSource
     {
         var results = new List<DocumentEntry>();
 
-        // Home repo: full top-level *.md + docs/** scan.
+        // Home repo (huddle): top-level *.md + docs/**, across its worktrees.
         if (!string.IsNullOrEmpty(_huddleRoot) && Directory.Exists(_huddleRoot))
-        {
-            // Resilient walk: a concurrently written file or a created/removed/reparse-point
-            // subdir skips only that item, never the whole repo (see SafeEnumerateMarkdown).
-            var files = new List<string>();
-            files.AddRange(SafeEnumerateMarkdown(_huddleRoot, recurse: false));
-            var docsDir = Path.Combine(_huddleRoot, "docs");
-            if (Directory.Exists(docsDir))
-                files.AddRange(SafeEnumerateMarkdown(docsDir, recurse: true));
-            foreach (var file in files)
-                AddFile(file, "huddle", maxLevel, results);
-        }
+            DiscoverRepo("huddle", _huddleRoot, includeTopLevel: true, maxLevel, results);
 
-        // Every other registered repo: full docs/** discovered so any folder is filterable
+        // Every other registered repo: full docs/** so any folder is filterable
         // (docs <folder>, docs -1w). The VERB keeps the BARE listing quiet — it shows
         // cross-repo auto docs only under the reference tier unless a filter is set.
         var huddleFull = NormDir(_huddleRoot);
         foreach (var (repoName, def) in _repos)
         {
             if (string.IsNullOrEmpty(def.Root) || NormDir(def.Root) == huddleFull) continue;  // home repo done above
-            var docsDir = Path.Combine(def.Root, "docs");
-            if (!Directory.Exists(docsDir)) continue;
-            // Resilient walk — a concurrent write / bad subdir under docs/ no longer drops
-            // the whole repo's docs for this run (see SafeEnumerateMarkdown).
-            foreach (var file in SafeEnumerateMarkdown(docsDir, recurse: true))
-                AddFile(file, repoName, maxLevel, results);
+            DiscoverRepo(repoName, def.Root, includeTopLevel: false, maxLevel, results);
         }
 
         _log($"docs: auto-discovered {results.Count} repo doc(s) at <= {maxLevel}");
         return results;
+    }
+
+    // Discover one registered repo's docs across ALL its git worktrees, main-canonical.
+    // A doc authored on a feature branch lives only in a linked worktree until it merges;
+    // walking worktrees surfaces it pre-merge. The same repo-relative doc from a linked
+    // worktree is suppressed once the main worktree has it (post-merge) — dedupe is by
+    // repo-relative path, main worktree first (GitWorktrees.ForRepo orders it so), so
+    // trunk wins and the doc never double-lists during the overlap window. A linked
+    // worktree's own docs are tagged with the branch they live on.
+    private void DiscoverRepo(string repoName, string registeredRoot, bool includeTopLevel,
+        DocLevel maxLevel, List<DocumentEntry> results)
+    {
+        var seenRel = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var wt in GitWorktrees.ForRepo(registeredRoot))   // main first
+        {
+            if (!Directory.Exists(wt.Root)) continue;
+            // Resilient walk: a concurrently written file or a created/removed/reparse-point
+            // subdir skips only that item, never the whole repo (see SafeEnumerateMarkdown).
+            var files = new List<string>();
+            if (includeTopLevel)
+                files.AddRange(SafeEnumerateMarkdown(wt.Root, recurse: false));
+            var docsDir = Path.Combine(wt.Root, "docs");
+            if (Directory.Exists(docsDir))
+                files.AddRange(SafeEnumerateMarkdown(docsDir, recurse: true));
+
+            foreach (var file in files)
+            {
+                var rel = RelUnder(wt.Root, file);
+                if (!seenRel.Add(rel)) continue;   // main-canonical: an earlier worktree already has it
+                AddFile(file, repoName, wt.IsMain ? null : wt.Branch, maxLevel, results);
+            }
+        }
+    }
+
+    // Repo-relative path (forward slashes) — the doc's identity for main-canonical dedupe.
+    private static string RelUnder(string baseDir, string file)
+    {
+        try { return Path.GetRelativePath(baseDir, file).Replace('\\', '/'); }
+        catch { return file; }
     }
 
     // Resilient recursive *.md enumeration. Directory.GetFiles(..., AllDirectories) walks the
@@ -424,7 +453,10 @@ public sealed class FilesystemDocSource : IDocumentSource
         return null;
     }
 
-    private void AddFile(string file, string repoName, DocLevel maxLevel, List<DocumentEntry> results)
+    // branch != null tags the entry as living on a linked (feature-branch) worktree, so
+    // the listing shows "(repo@branch)" and the operator can tell pre- from post-merge.
+    // Note stays "auto" either way — curation (IsCuratedOut) keys on that, unchanged.
+    private void AddFile(string file, string repoName, string? branch, DocLevel maxLevel, List<DocumentEntry> results)
     {
         var level = InferLevel(file);
         if (level > maxLevel) return;
@@ -435,7 +467,7 @@ public sealed class FilesystemDocSource : IDocumentSource
         results.Add(new DocumentEntry(
             Title: TitleOf(file),
             Path: Path.GetFullPath(file),
-            SourceSession: $"({repoName})",
+            SourceSession: branch == null ? $"({repoName})" : $"({repoName}@{branch})",
             Repo: repoName,
             Timestamp: ts,
             Level: level,

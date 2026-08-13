@@ -41,6 +41,8 @@ public static class ProjectReport
                 --pill-active: #dcfce7; --pill-active-ink: #166534;
                 --pill-paused: #fef3c7; --pill-paused-ink: #92400e;
                 --pill-done: #e2e8f0; --pill-done-ink: #334155;
+                --pill-research: #dbeafe; --pill-research-ink: #1e40af;
+                --pill-eol: #f1d9d9; --pill-eol-ink: #7f1d1d;
               }
               @media (prefers-color-scheme: dark) {
                 :root {
@@ -49,6 +51,8 @@ public static class ProjectReport
                   --pill-active: #14532d; --pill-active-ink: #bbf7d0;
                   --pill-paused: #451a03; --pill-paused-ink: #fde68a;
                   --pill-done: #1e293b; --pill-done-ink: #cbd5e1;
+                  --pill-research: #1e3a5f; --pill-research-ink: #bfdbfe;
+                  --pill-eol: #3f1d1d; --pill-eol-ink: #fecaca;
                 }
               }
               * { box-sizing: border-box; }
@@ -67,6 +71,9 @@ public static class ProjectReport
               .pill.active { background: var(--pill-active); color: var(--pill-active-ink); }
               .pill.paused { background: var(--pill-paused); color: var(--pill-paused-ink); }
               .pill.other  { background: var(--pill-done);   color: var(--pill-done-ink); }
+              .pill.research { background: var(--pill-research); color: var(--pill-research-ink); }
+              .pill.released { background: var(--pill-done);     color: var(--pill-done-ink); }
+              .pill.eol      { background: var(--pill-eol);      color: var(--pill-eol-ink); }
               .sprint { font-size: 12.5px; color: var(--accent); font-weight: 600; }
               .goal { margin: 8px 0 2px; }
               .meta { color: var(--muted); font-size: 13px; margin: 2px 0 10px; }
@@ -105,33 +112,68 @@ public static class ProjectReport
             var p = e.Project;
             sb.Append("<div class=\"card\">\n");
 
-            var pillClass = p.Status.ToLowerInvariant() switch
-            {
-                "active" => "active",
-                "paused" => "paused",
-                _ => "other"
-            };
+            var pillClass = PillClass(p.Status);
             sb.Append($"<div class=\"head\"><span class=\"slug\">{Esc(p.Slug)}</span>");
             sb.Append($"<span class=\"title\">{Esc(p.Title)}</span>");
             if (!string.IsNullOrEmpty(p.Status))
                 sb.Append($"<span class=\"pill {pillClass}\">{Esc(p.Status)}</span>");
             if (p.MapOnly)
                 sb.Append("<span class=\"pill other\">map-only</span>");
+            if (p.Derived != null)
+                sb.Append("<span class=\"pill other\">derived</span>");
             if (p.SprintId != null)
                 sb.Append($"<span class=\"sprint\">sprint {Esc(p.SprintId)}{(p.SprintVersion != null ? $" · {Esc(p.SprintVersion)}" : "")}</span>");
             sb.Append("</div>\n");
 
             if (!string.IsNullOrEmpty(p.Goal))
                 sb.Append($"<div class=\"goal\">{Esc(p.Goal)}</div>\n");
-            if (!p.MapOnly)
+            if (!p.MapOnly && p.Derived == null)
                 sb.Append($"<div class=\"meta\">home: {Esc(p.HomeRepo)}{(p.Repos.Count > 1 ? " · repos: " + Esc(string.Join(", ", p.Repos)) : "")}</div>\n");
+
+            // Derived summary: what huddle read from the repo's own corpora (README +
+            // git), for projects that point at a source instead of a hand-written doc.
+            if (p.Derived != null)
+            {
+                var d = p.Derived;
+                // A curated goal is the headline; don't repeat the README line under it.
+                if (string.IsNullOrEmpty(p.Goal) && !string.IsNullOrEmpty(d.What))
+                    sb.Append($"<div class=\"goal\">{Esc(d.What!)}</div>\n");
+                var bits = new List<string>();
+                if (!string.IsNullOrEmpty(d.Branch)) bits.Add("branch " + Esc(d.Branch!));
+                if (d.LastCommitAt != null)
+                {
+                    var c = "last commit " + d.LastCommitAt.Value.ToString("yyyy-MM-dd");
+                    if (!string.IsNullOrEmpty(d.LastCommit))
+                    {
+                        var sub = d.LastCommit!;
+                        if (sub.Length > 80) sub = sub[..80] + "…";
+                        c += " — " + Esc(sub);
+                    }
+                    bits.Add(c);
+                }
+                bits.Add(d.Commits30d + " commit(s)/30d");
+                sb.Append($"<div class=\"meta\">{Esc(d.Repo)}: {string.Join(" · ", bits)}</div>\n");
+
+                // Auto-surfaced docs: the folder (browse-all) + the newest few. We never
+                // hand-list a doc-heavy project — the count + recent slice is the summary.
+                if (d.DocCount > 0)
+                {
+                    sb.Append("<h3>Docs</h3>\n<ul>\n");
+                    if (!string.IsNullOrEmpty(d.DocsDir))
+                        sb.Append(ArtifactLi(d.DocsDir!, $"docs/ — browse all {d.DocCount}"));
+                    foreach (var doc in d.RecentDocs)
+                        sb.Append(ArtifactLi(doc, Path.GetFileName(doc)));
+                    sb.Append("</ul>\n");
+                }
+            }
             if (p.Warning != null)
                 sb.Append($"<div class=\"warn\">&#9888; {Esc(p.Warning)}</div>\n");
             if (p.MapNotes != null)
                 sb.Append($"<div class=\"mapnote\">{Esc(p.MapNotes)}</div>\n");
 
-            // Artifacts: project.md + typed files as file:// links.
-            if (!p.MapOnly)
+            // Artifacts: project.md + typed files as file:// links. Only a real
+            // project.md dir has these; a derived entry (Dir == "") shows none.
+            if (!p.MapOnly && !string.IsNullOrEmpty(p.Dir))
             {
                 sb.Append("<h3>Artifacts</h3>\n<ul>\n");
                 sb.Append(ArtifactLi(Path.Combine(p.Dir, "project.md"), "project.md"));
@@ -180,6 +222,19 @@ public static class ProjectReport
     {
         var uri = "file:///" + path.Replace('\\', '/');
         return $"<li><a href=\"{Esc(uri)}\">{Esc(name)}</a> <span class=\"focus\">{Esc(path)}</span></li>\n";
+    }
+
+    // Status -> pill CSS class, matching the same tiers as ProjectMap.StatusRank so the
+    // colour and the sort agree (EOL/legacy red, active green, research blue, released slate).
+    private static string PillClass(string status)
+    {
+        var s = (status ?? "").Trim().ToLowerInvariant();
+        if (s.Contains("eol") || s.Contains("legacy")) return "eol";
+        if (s.StartsWith("active")) return "active";
+        if (s.StartsWith("research")) return "research";
+        if (s.StartsWith("release") || s.StartsWith("shipped")) return "released";
+        if (s.StartsWith("paused")) return "paused";
+        return "other";
     }
 
     /// <summary>Minimal HTML escape — operator/agent text must never become markup.</summary>

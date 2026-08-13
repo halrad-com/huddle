@@ -221,7 +221,7 @@ public class ConsoleUI
             Console.WriteLine("  send <instance> <msg>    Send a message to a session's inbox");
             Console.WriteLine("  say <instance> <text>    Inject a prompt directly into a session's console");
             Console.WriteLine("  shell [<repo>] <data>    Hand <data> to the OS shell (file handler); optional repo sets CWD");
-            Console.WriteLine("  broadcast [@repo] <subj> <msg>  Fan out a message to live sessions (optionally only repo's agents)");
+            Console.WriteLine("  broadcast [@repo] <message>  Fan out a message to live sessions (optionally only repo's agents)");
             Console.WriteLine("  messages <instance>      List messages in a session's inbox");
             Console.WriteLine("  huddle <group>           Start all sessions in a group");
             Console.WriteLine("  delegate \"desc\" to <inst>  Delegate a task to a session");
@@ -242,6 +242,7 @@ public class ConsoleUI
             Console.WriteLine("  recover [n|all|dismiss n]  List sessions lost to a crash and relaunch them show-and-pick");
             Console.WriteLine("  projects [html [path]]   List projects; 'projects html' writes the status page (repro output demo)");
             Console.WriteLine("  project <slug>           Project detail: artifacts, sprint, live sessions, claims");
+            Console.WriteLine("  handoffs [@repo] [n]     Who handed what to whom, newest first (auto-announced as they land)");
             Console.WriteLine("  direct <english task>    Hand a task to huddle:architect to plan + dispatch automatically");
             Console.WriteLine("  quit                     Exit huddle, sessions keep running");
             Console.WriteLine("  shutdown                 Stop all sessions and exit");
@@ -409,6 +410,10 @@ public class ConsoleUI
 
             case "project":
                 HandleProjectDetail(arg);
+                break;
+
+            case "handoffs" or "handoff":
+                HandleHandoffs(arg);
                 break;
 
             case "personas" or "p":
@@ -1261,6 +1266,48 @@ public class ConsoleUI
             _manager.Repos.Select(kv => (kv.Key, kv.Value.Root)), mapJson, Log);
     }
 
+    // `handoffs [@repo] [n]` — the handoff trail, newest first, from the ledger. These
+    // are also announced live (`[handoff] a -> b: task`) the moment the mail lands, so
+    // this verb is the history, not the only way to see them.
+    private void HandleHandoffs(string arg)
+    {
+        var ledger = Ipc?.Handoffs;
+        if (ledger == null) { Log("handoffs: IPC is disabled."); return; }
+
+        string? repo = null;
+        var limit = 20;
+        foreach (var tok in arg.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (tok.StartsWith("@", StringComparison.Ordinal))
+                repo = _manager.ResolveRepoName(tok[1..]) ?? tok[1..];
+            else if (int.TryParse(tok, out var n) && n > 0)
+                limit = n;
+        }
+
+        IEnumerable<HandoffEntry> q = ledger.ReadAll().OrderByDescending(h => h.At);
+        if (repo != null)
+            q = q.Where(h => HandoffRepoOf(h.From).Equals(repo, StringComparison.OrdinalIgnoreCase)
+                          || HandoffRepoOf(h.To).Equals(repo, StringComparison.OrdinalIgnoreCase));
+
+        var shown = q.Take(limit).ToList();
+        if (shown.Count == 0) { Log("No handoffs recorded yet."); return; }
+
+        Log($"{shown.Count} handoff(s), newest first:");
+        foreach (var h in shown)
+        {
+            Log($"  {h.At:MM-dd HH:mm}  {h.From} -> {h.To}   {h.Task}");
+            if (!string.IsNullOrWhiteSpace(h.State))
+                Console.WriteLine($"                        {h.State}");
+        }
+    }
+
+    // Repo half of an "repo:persona" instance id (whole string if unqualified).
+    private static string HandoffRepoOf(string instanceId)
+    {
+        var i = instanceId.IndexOf(':');
+        return i > 0 ? instanceId[..i] : instanceId;
+    }
+
     private List<WorkLedgerClaim> ReadActiveClaims()
     {
         var dir = Ipc?.ClaimsDir;
@@ -1995,6 +2042,35 @@ public class ConsoleUI
         }
     }
 
+    /// <summary>Result of parsing a `broadcast` command line.</summary>
+    public readonly record struct BroadcastParse(string? RepoCsv, string Subject, string Message);
+
+    // `broadcast [@repo[,repo]] <message>` — everything after the optional @repo
+    // prefix is the message, verbatim. The subject is derived (first few words)
+    // purely as a log/list label, so no typed text is ever dropped from the body.
+    // Returns null when there is no message to send.
+    public static BroadcastParse? ParseBroadcast(string arg)
+    {
+        arg = (arg ?? "").Trim();
+        string? repoCsv = null;
+        if (arg.StartsWith('@'))
+        {
+            var sp = arg.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+            // Only consume the first token when it actually named a repo. A bare
+            // "@" names nothing, so it stays part of the message rather than
+            // being silently swallowed.
+            if (sp.Length > 0 && sp[0].Length > 1)
+            {
+                repoCsv = sp[0][1..];
+                arg = sp.Length > 1 ? sp[1].Trim() : "";
+            }
+        }
+        if (string.IsNullOrWhiteSpace(arg)) return null;
+        var words = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var subject = string.Join(' ', words.Take(6));
+        return new BroadcastParse(repoCsv, subject, arg);
+    }
+
     private void HandleBroadcast(string arg)
     {
         if (Orchestrator == null || Ipc == null)
@@ -2003,30 +2079,22 @@ public class ConsoleUI
             return;
         }
 
-        var split = arg.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-        string? repoCsv = null;
-        if (split.Length > 0 && split[0].Length > 1 && split[0][0] == '@')
+        var parsed = ParseBroadcast(arg);
+        if (parsed is null)
         {
-            repoCsv = split[0][1..];
-            arg = split.Length > 1 ? split[1] : "";
-            split = arg.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-        }
-        if (split.Length < 2)
-        {
-            Log("Usage: broadcast [@repo[,repo]] <subject> <message>");
+            Log("Usage: broadcast [@repo[,repo]] <message>");
             return;
         }
-        var subject = split[0];
-        var message = split[1];
+        var p = parsed.Value;
 
         // Synthesize a broadcast command into the orchestrator's inbox so it
         // flows through the same code path as IPC-originated broadcasts.
-        var subjJson = System.Text.Json.JsonSerializer.Serialize(subject);
-        var msgJson = System.Text.Json.JsonSerializer.Serialize(message);
-        var repoJson = repoCsv is null ? "" : $",\"repo\":{System.Text.Json.JsonSerializer.Serialize(repoCsv)}";
+        var subjJson = System.Text.Json.JsonSerializer.Serialize(p.Subject);
+        var msgJson = System.Text.Json.JsonSerializer.Serialize(p.Message);
+        var repoJson = p.RepoCsv is null ? "" : $",\"repo\":{System.Text.Json.JsonSerializer.Serialize(p.RepoCsv)}";
         var body = $"{{\"subject\":{subjJson},\"body\":{msgJson},\"type\":\"info\",\"targets\":\"all\"{repoJson}}}";
         Ipc.Send("_huddle_console", Orchestrator.HuddleMailbox, "broadcast", body, "command");
-        Log(repoCsv is null ? $"Broadcast queued: {subject}" : $"Broadcast queued to [{repoCsv}]: {subject}");
+        Log(p.RepoCsv is null ? $"Broadcast queued: {p.Message}" : $"Broadcast queued to [{p.RepoCsv}]: {p.Message}");
     }
 
     private void HandleMessages(string arg)
