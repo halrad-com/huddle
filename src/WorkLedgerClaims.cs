@@ -102,6 +102,36 @@ public class WorkLedgerClaims
     }
 
     /// <summary>
+    /// As <see cref="TryClaim(WorkLedgerClaim, out List{ClaimOverlap})"/>, but a conflict against a
+    /// DEAD session's claim does not block the claimant: orphan holders are reaped inline (archived,
+    /// reversible) and the claim is re-checked against what remains. Closes the window where a stale
+    /// claim from an exited session forced a manual `conflicts` sweep before a re-claim could succeed.
+    /// The <paramref name="live"/> roster is the reap authority; an EMPTY roster disables reaping
+    /// entirely (during incomplete recovery every claim looks orphaned) — mirrors
+    /// <c>Orchestrator.ReapOrphanClaims</c>' empty-set guard.
+    /// </summary>
+    public bool TryClaim(WorkLedgerClaim claim, IReadOnlyList<LiveInstance> live, out List<ClaimOverlap> conflicts)
+    {
+        lock (_lock)
+        {
+            var active = ReadAll();
+            conflicts = FindConflictsWithActive(new[] { claim }, active);
+            if (conflicts.Count == 0) { WriteCore(claim); return true; }
+
+            // A live claimant blocked only by dead sessions' claims should win. With no live
+            // roster we cannot tell dead from live, so leave the conflict standing.
+            if (live.Count == 0) return false;
+            if (ReapOrphans(live).Count == 0) return false; // holder(s) are live — genuine conflict
+
+            active = ReadAll();
+            conflicts = FindConflictsWithActive(new[] { claim }, active);
+            if (conflicts.Count > 0) return false;
+            WriteCore(claim);
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Read and parse a single claim file. Returns null on malformed input (and logs).
     /// </summary>
     public WorkLedgerClaim? ReadFile(string path)

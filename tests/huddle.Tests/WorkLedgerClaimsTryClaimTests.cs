@@ -172,4 +172,79 @@ public class WorkLedgerClaimsTryClaimTests : IDisposable
         Assert.Equal(1, wins);
         Assert.Single(_claims.ReadAll());
     }
+
+    // ---- Reap-on-nack: a live claimant must not be blocked by a DEAD session's claim ----
+    // Closes the "still yours to delete" window: an orphan holder (owning session gone)
+    // no longer forces a manual `conflicts` sweep before a live session can re-claim.
+
+    private static WorkLedgerClaim Owned(string session, string id, Guid owner, DateTime claimedAt, params string[] files) =>
+        new(session, "repo1", id, claimedAt, "abc123", files, owner.ToString());
+
+    private static readonly DateTime R0 = new(2026, 8, 5, 8, 0, 0, DateTimeKind.Utc);
+
+    [Fact]
+    public void OrphanHolderIsReapedInlineSoLiveClaimantWins()
+    {
+        // A dead session (its GUID is absent from the live roster) holds the file.
+        var deadOwner = Guid.NewGuid();
+        _claims.Write(Owned("repo1:ghost", "R-dead", deadOwner, R0, "src/a.cs"));
+
+        var liveGuid = Guid.NewGuid();
+        var live = new List<WorkLedgerClaims.LiveInstance> { new("repo1:architect", liveGuid, R0.AddHours(5)) };
+        var mine = new WorkLedgerClaim("repo1:architect", "repo1", "R-mine", DateTime.UtcNow, "abc123",
+            new[] { "src/a.cs" }, liveGuid.ToString());
+
+        var ok = _claims.TryClaim(mine, live, out var conflicts);
+
+        Assert.True(ok);
+        Assert.Empty(conflicts);
+        // The live claim is the only active one; the dead claim was ARCHIVED (reversible), not deleted.
+        var active = _claims.ReadAll();
+        Assert.Single(active);
+        Assert.Equal("R-mine", active[0].BatchId);
+        Assert.Contains(Directory.GetFiles(_dir, "*.md", SearchOption.AllDirectories),
+            p => p.Contains("archived-orphan"));
+    }
+
+    [Fact]
+    public void LiveHolderStillBlocksClaim()
+    {
+        // The holder's GUID IS in the live roster — a real conflict, reap must not touch it.
+        var ghostGuid = Guid.NewGuid();
+        _claims.Write(Owned("repo1:ghost", "R-held", ghostGuid, R0, "src/a.cs"));
+
+        var liveGuid = Guid.NewGuid();
+        var live = new List<WorkLedgerClaims.LiveInstance>
+        {
+            new("repo1:ghost", ghostGuid, R0),
+            new("repo1:architect", liveGuid, R0.AddHours(5)),
+        };
+        var mine = new WorkLedgerClaim("repo1:architect", "repo1", "R-mine", DateTime.UtcNow, "abc123",
+            new[] { "src/a.cs" }, liveGuid.ToString());
+
+        var ok = _claims.TryClaim(mine, live, out var conflicts);
+
+        Assert.False(ok);
+        Assert.Single(conflicts);
+        Assert.Single(_claims.ReadAll()); // holder's claim untouched, mine not written
+    }
+
+    [Fact]
+    public void EmptyLiveRosterDoesNotReapAndRejects()
+    {
+        // Incomplete-recovery guard: with 0 live instances every claim looks orphaned,
+        // so reaping is skipped entirely (mirrors Orchestrator.ReapOrphanClaims) and the
+        // conflict stands rather than archiving a possibly-live session's claim.
+        var deadOwner = Guid.NewGuid();
+        _claims.Write(Owned("repo1:ghost", "R-dead", deadOwner, R0, "src/a.cs"));
+
+        var mine = new WorkLedgerClaim("repo1:architect", "repo1", "R-mine", DateTime.UtcNow, "abc123",
+            new[] { "src/a.cs" }, Guid.NewGuid().ToString());
+
+        var ok = _claims.TryClaim(mine, new List<WorkLedgerClaims.LiveInstance>(), out var conflicts);
+
+        Assert.False(ok);
+        Assert.Single(conflicts);
+        Assert.Single(_claims.ReadAll()); // nothing archived
+    }
 }

@@ -946,7 +946,15 @@ public class Orchestrator : IDisposable
             var claimProject = StringProp(body, "project") ?? ownerInstance?.Project ?? "";
             var claim = new WorkLedgerClaim(ownerId, resolvedRepo, claimId, DateTime.UtcNow, baseSha, files, ownerGuid, claimProject);
 
-            if (_claims.TryClaim(claim, out var conflicts))
+            // Reap-on-nack: a conflict against a dead session's stale claim must not block a
+            // live claimant. Pass the current live roster so TryClaim can archive orphan holders
+            // inline (empty roster disables reaping — recovery guard).
+            var live = _manager.Instances.Values
+                .Where(i => i.IsAlive)
+                .Select(i => new WorkLedgerClaims.LiveInstance(i.InstanceId, i.SessionId, i.StartedAt))
+                .ToList();
+
+            if (_claims.TryClaim(claim, live, out var conflicts))
             {
                 _log($"Orchestrator: claim granted — {msg.From} holds {files.Count} file(s) in {resolvedRepo} ({claimId})");
                 SendAck(msg.From, msg.Subject, $"claimed {files.Count} file(s) in {resolvedRepo} — release when done");
