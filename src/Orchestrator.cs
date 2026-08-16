@@ -949,12 +949,7 @@ public class Orchestrator : IDisposable
             // Reap-on-nack: a conflict against a dead session's stale claim must not block a
             // live claimant. Pass the current live roster so TryClaim can archive orphan holders
             // inline (empty roster disables reaping — recovery guard).
-            var live = _manager.Instances.Values
-                .Where(i => i.IsAlive)
-                .Select(i => new WorkLedgerClaims.LiveInstance(i.InstanceId, i.SessionId, i.StartedAt))
-                .ToList();
-
-            if (_claims.TryClaim(claim, live, out var conflicts))
+            if (_claims.TryClaim(claim, LiveRoster(), out var conflicts))
             {
                 _log($"Orchestrator: claim granted — {msg.From} holds {files.Count} file(s) in {resolvedRepo} ({claimId})");
                 SendAck(msg.From, msg.Subject, $"claimed {files.Count} file(s) in {resolvedRepo} — release when done");
@@ -1092,14 +1087,20 @@ public class Orchestrator : IDisposable
         return t.Length > 70 ? t[..70] + "…" : t;
     }
 
+    // The current live roster as the claim arbiter sees it — canonical id, conversation
+    // GUID, start time. Built fresh at each use (never cached): a session started moments
+    // ago must appear here so its own just-written claim is never mistaken for an orphan.
+    private List<WorkLedgerClaims.LiveInstance> LiveRoster() =>
+        _manager.Instances.Values
+            .Where(i => i.IsAlive)
+            .Select(i => new WorkLedgerClaims.LiveInstance(i.InstanceId, i.SessionId, i.StartedAt))
+            .ToList();
+
     public void ReapOrphanClaims()
     {
         try
         {
-            var live = _manager.Instances.Values
-                .Where(i => i.IsAlive)
-                .Select(i => new WorkLedgerClaims.LiveInstance(i.InstanceId, i.SessionId, i.StartedAt))
-                .ToList();
+            var live = LiveRoster();
 
             if (live.Count == 0)
             {
@@ -1192,8 +1193,12 @@ public class Orchestrator : IDisposable
             // command) is invisible to Dispatchable(). Acquire through the same
             // arbiter so a batch can never dispatch over a runtime claimant —
             // on conflict the unit simply stays queued and retries on the next
-            // advance (a release/stop always triggers one).
-            if (!_claims.TryClaim(new WorkLedgerClaim(sessionId, u.Repo, u.Id, DateTime.UtcNow, baseSha, u.Files), out var extConflicts))
+            // advance (a release/stop always triggers one). Reap-on-nack: a block
+            // by a DEAD session's stale claim is cleared inline rather than parking
+            // the unit until the next startup/`conflicts` sweep. The roster is rebuilt
+            // per iteration so a unit dispatched earlier in THIS advance is live and
+            // its own fresh claim is never reaped.
+            if (!_claims.TryClaim(new WorkLedgerClaim(sessionId, u.Repo, u.Id, DateTime.UtcNow, baseSha, u.Files), LiveRoster(), out var extConflicts))
             {
                 var detail = string.Join("; ", extConflicts.Select(o =>
                     $"{o.B.SessionId} holds {string.Join(", ", o.SharedFiles)}"));
