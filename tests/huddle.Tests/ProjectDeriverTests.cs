@@ -11,7 +11,7 @@ public class ProjectDeriverTests
 {
     [Theory]
     [InlineData("otherapp", "otherapp", "", null)]
-    [InlineData("myapp@ROCKALLEY", "myapp", "", "ROCKALLEY")]
+    [InlineData("myapp@FEATURE", "myapp", "", "FEATURE")]
     [InlineData("refcode/mb_clouseau", "refcode", "mb_clouseau", null)]
     [InlineData("LIB/a/b@feat", "LIB", "a/b", "feat")]
     [InlineData("  spaced  ", "spaced", "", null)]

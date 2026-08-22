@@ -82,39 +82,123 @@ standalone truth; huddle's `projects` / `project <slug>` verbs are the lens over
 
 ## Work Coordination — claims are MANDATORY, not advisory
 
-**Rule: no substantive edits without a granted claim.** On 2026-07-16 two sessions
+**Rule: no substantive edits without a claim in the ledger.** On 2026-07-16 two sessions
 executed the same plan in parallel with no claims — duplicated hours, corrupted a
-product file. The freeform ledger alone did not prevent it. The
-orchestrator is now the arbiter.
+product file. The freeform ledger alone did not prevent it.
+
+**Claims go straight to the ledger now — not through huddle.** The old protocol had you
+mail a `claim` command to the orchestrator and wait for an ack. On 2026-08-16 huddle was
+down: the mail sat unread in `_huddle/inbox/`, no claim was ever recorded, and two
+`myapp` agents worked the same files invisible to each other. So
+the write path no longer runs through an arbiter. `huddle --claim` / `--release` /
+`--ledger` run the **binary** — they read and write `ipc/workledger/claims/` directly and
+work whether or not the console is up. Your identity and the ledger's location arrive as
+environment variables at spawn, so you type only paths.
 
 **Before your first substantive edit** (any multi-file work, any plan execution,
 anything beyond a trivial one-liner):
 
-1. **If your task arrived via `dispatch-batch`, your claim already exists** — the
-   orchestrator wrote it when it spawned you. Skip to step 3.
-2. **Otherwise (console-started, operator-typed task, mail-triggered, self-initiated):
-   send a `claim` command** to `<ipc-root>/_huddle/inbox/`:
+1. **Read the ledger.** `huddle --ledger <repo>` prints what is claimed, by whom, and
+   since when — one line per claimed file (omit the repo to see everything). This is the
+   read-before-you-work view, and it works with huddle down.
+2. **Claim what you are about to touch.** `huddle --claim <path> [more paths...]`, with
+   repo-relative paths. It **always succeeds** — there is nothing to wait for and no ack
+   to watch for. Claim your REAL scope up front; extending it later is fine (just run it
+   again). **Executing a plan? Include the plan doc's path.** That puts the plan itself
+   in the ledger, so a second session about to run the same plan sees you holding the
+   plan file before any code collides.
+3. **If the output names another holder, do not edit those files.** An overlapping claim
+   prints `ALSO HELD BY <session> since <time>: <files>`. The ledger *records*; you and
+   the other agent *decide*. Mail the holder, agree who goes first, take turns — nobody
+   arbitrates this for you. Weigh the claim time while you're at it: a holder from days
+   ago may be a session that has since died, and `huddle --claim` has no live roster to
+   tell you (a `claim` mailed to a RUNNING huddle does — it reaps dead holders' claims
+   before it reports, so any holder it names is one that still exists).
+4. **Release as you finish**, after committing: `huddle --release <path> [more paths...]`
+   (see the commit-then-release idiom below). It only releases files from your OWN
+   claims; another session's claim on the same file is untouched. Anything you still
+   hold is auto-released when your session stops — but only if huddle is up to do it,
+   which is exactly why you release explicitly.
+5. **Work that arrived via `dispatch-batch` already has its claim** — the orchestrator
+   wrote it when it spawned you. Read the ledger, but do not re-claim.
 
-   ```json
-   {"from":"<your-instance-id>","to":"_huddle","timestamp":"<ISO-8601-UTC>",
-    "type":"command","subject":"claim",
-    "body":{"repo":"<repo-name>","files":["path/one.cs","docs/superpowers/plans/the-plan.md"]}}
-   ```
+### There are two ways to claim. If one is unavailable, use the other.
 
-   - **Executing a plan? Include the plan doc's path in `files`.** That locks the
-     plan itself — a second session trying to run the same plan gets nacked on the
-     plan file before any code collides.
-   - **Wait for the reply.** `ack:claim` = the files are yours. `nack:claim` = another
-     session holds them — the nack names the holder. **Do NOT edit those files.**
-     Mail the holder to coordinate, or wait and re-claim after they release.
-   - Claim your REAL scope up front. Extending your own claim later is allowed
-     (send another `claim`), but claim-as-you-go risks a mid-plan nack.
-3. **Commit-then-release** as you finish (see the release idiom below). Your claims
-   are auto-released when your session stops.
+They fail in opposite conditions, so you are almost never without a route:
+
+| Route | Works when | Answers | Needs |
+|---|---|---|---|
+| `huddle --claim <paths>` | huddle is **down** | **immediately** | spawn-time env (`HUDDLE_CLAIMS`, `HUDDLE_EXE`, PATH) |
+| `claim` command mailed to `_huddle` | huddle is **up** | asynchronously | nothing but a file write |
+
+**Prefer the CLI when you are about to start editing.** The mail route is asynchronous, so you
+can claim, begin work, and only learn several minutes later that someone else holds the file —
+this happened on 2026-08-16, where the ack naming the other holder arrived after two edits had
+already been made. The CLI tells you before you touch anything.
+
+**Mailing a claim is a first-class route, not a footnote.** Write JSON to
+`ipc/_huddle/inbox/` with a unique filename — `{"from":"<you>","to":"_huddle",
+"timestamp":"<ISO-8601-UTC>","type":"command","subject":"claim","body":{"repo":"<repo>",
+"files":["path/one.cs"]}}` — and wait for `ack:claim`. Use forward slashes; an unescaped
+backslash is invalid JSON and the message will not deliver. This path also *reaps dead
+holders' claims* before it answers, which `huddle --claim` cannot.
+
+**If `huddle` is not on your PATH, the binary still works — supply the environment yourself.**
+Sessions spawned before the ledger CLI shipped have no `HUDDLE_*` variables and never will,
+but nothing stops you invoking the executable directly. This is the fastest route when it
+applies, because you get the answer immediately instead of mailing and waiting for an ack:
+
+```bash
+HUDDLE_CLAIMS=<huddle-root>/ipc/workledger/claims \
+HUDDLE_INSTANCE=<your repo:persona> \
+HUDDLE_REPO=<your registered repo name> \
+<huddle-root>/publish/huddle.exe --claim src/One.cs src/Two.cs
+```
+
+`--release` and `--ledger` take the same prefix. Your instance id is the `repo:persona`
+exactly as it appears in `logs/context.md`. Paths are **repo-relative** — an absolute path
+records a claim that matches nobody and is rejected.
+
+**Reading the ledger never needs tooling at all.** Claims are plain markdown in
+`ipc/workledger/claims/`. Glob and Read them directly whenever you want to see who holds
+what — that works with huddle up or down, with or without the CLI.
+
+**`nack:claim` no longer means contention** — it means the request was malformed (bad
+body, unknown repo, empty file list). Fix the request and resend.
+
+### Before you say you are done
+
+**Report what you did NOT verify, unprompted.** "Edited but not built" is a legitimate
+state to be in and to report; silently implying it built is not. The same goes for "tests
+not run", "not tried against a live instance", "verified by reading only". A gap you name
+costs a sentence; a gap someone discovers later costs their trust in everything else you
+said.
+
+**Re-read immediately before editing.** The working directory is shared and siblings are
+active, so a file may have changed since you last read it. Read → edit as one tight
+sequence; never act on a read from twenty minutes ago.
+
+**When in doubt, ask.** A question to the operator costs one turn. An unauthorised merge, a
+wrong-configuration build, or a `git add -A` costs an afternoon.
+
+### If you genuinely cannot claim by either route
+
+**Do not stop working.** A stalled fleet is worse than an unclaimed edit — the claim
+exists to stop two agents silently editing one file, not to stop you working. Sessions
+spawned before the ledger CLI shipped have no `HUDDLE_*` environment and never will
+(environment is fixed at launch), so this case is real and expected.
+
+1. **Read `ipc/workledger/claims/` directly** and check nobody holds your files. This is
+   the part that actually prevents the collision, and it always works.
+2. **Write your intent into the freeform ledger** at `ipc/workledger/<your-safe-name>.md`
+   — repo, files, timestamp, status. Other agents read it.
+3. **Say so plainly at the top of your next reply**, and mail your dispatcher if you were
+   dispatched, so the gap is visible rather than silent.
+4. **Then proceed.**
 
 **The freeform ledger entry** at `ipc/workledger/<your-safe-name>.md` is still
 required as human-readable status — what you're doing, expected files, timestamp,
-status: active/paused/done — but it is narrative, not the lock. The claim is the lock.
+status: active/paused/done — but it is narrative. The claim is the record.
 
 ## Branch Discipline
 
@@ -250,27 +334,22 @@ operator; the `handoff` mail is what huddle announces the moment it lands (`[han
 
 ## Commit-Then-Release (for claimed file work)
 
-When you are working on files that the orchestrator has claimed on your behalf (via a `dispatch-batch`), follow this idiom at each logical unit of work:
+Whenever the ledger holds a claim for your work — one you wrote with `huddle --claim`, or one the orchestrator wrote for you at `dispatch-batch` — follow this idiom at each logical unit of work:
 
 1. **Commit** with a clear, descriptive message that explains the *why* of the change, not just the *what*. Commit messages are the decision trail — write them like you're writing to a future developer (because you are).
-2. **Release** claims you are done with by sending a command message to the orchestrator:
+2. **Release** the claims you are done with, *after* the commit:
 
-   ```json
-   {
-     "from": "<your-instance-id>",
-     "to": "_huddle",
-     "timestamp": "<ISO-8601-UTC>",
-     "type": "command",
-     "subject": "release",
-     "body": { "files": ["path/relative/to/repo.cs", "another.md"] }
-   }
+   ```
+   huddle --release <path> [more paths...]
    ```
 
-   Write the file into `<ipc-root>/_huddle/inbox/` with a unique filename.
+   Repo-relative paths, same as `--claim`. It writes the ledger directly, so it works with huddle down, and it touches only your own claims.
+
+   The mail form still works if you'd rather send it — a `release` command to `<ipc-root>/_huddle/inbox/`, `{"from":"<you>","to":"_huddle","timestamp":"<ISO-8601-UTC>","type":"command","subject":"release","body":{"files":["path/relative/to/repo.cs","another.md"]}}` — but it only lands if the orchestrator is up to read it.
 
 3. **Hold the claim** if you are still editing the file in the next unit — don't release prematurely. Only release when you are genuinely done with that file for this batch.
 
-If your session stops (normal or crash) without releasing, the orchestrator auto-releases your remaining claims and logs a warning about any file you left dirty in the working tree. Prefer committing before you stop.
+If your session stops (normal or crash) without releasing, the orchestrator auto-releases your remaining claims and logs a warning about any file you left dirty in the working tree — but that cleanup needs huddle running, so an explicit `huddle --release` is the only one you can count on. Prefer committing before you stop.
 
 ## Capture-to-Test — freeze your verifications into regression tests
 

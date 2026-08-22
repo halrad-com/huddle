@@ -56,6 +56,18 @@ class Program
             return RunProjectsHtml(args);
         }
 
+        // Direct ledger access. These modes run the binary only - no running huddle,
+        // no orchestrator round-trip - so an agent can claim, release and read the
+        // ledger whether or not the console is up.
+        if (args.Length >= 1 && args[0] == "--claim")
+            return LedgerCommands.RunClaim(args[1..], Environment.GetEnvironmentVariable, Console.WriteLine);
+
+        if (args.Length >= 1 && args[0] == "--release")
+            return LedgerCommands.RunRelease(args[1..], Environment.GetEnvironmentVariable, Console.WriteLine);
+
+        if (args.Length >= 1 && args[0] == "--ledger")
+            return LedgerCommands.RunLedger(args[1..], Environment.GetEnvironmentVariable, Console.WriteLine);
+
         // Enable VT processing so OSC 8 hyperlinks (docs/history listings) work when
         // huddle runs under legacy conhost. When the console can't do VT, fall back
         // to plain-text titles instead of spewing raw escape sequences.

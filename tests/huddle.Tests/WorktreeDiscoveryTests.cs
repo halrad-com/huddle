@@ -16,9 +16,9 @@ public class WorktreeDiscoveryTests
         "HEAD 0efdeea7f0000000000000000000000000000000\n" +
         "branch refs/heads/master\n" +
         "\n" +
-        "worktree C:/Users/you/source/repos/LIB-rockalley\n" +
+        "worktree C:/Users/you/source/repos/LIB-FEATURE\n" +
         "HEAD fce786df00000000000000000000000000000000\n" +
-        "branch refs/heads/ROCKALLEY\n";
+        "branch refs/heads/FEATURE\n";
 
     [Fact]
     public void ParsePorcelain_YieldsMainFirst_WithBranches()
@@ -29,10 +29,10 @@ public class WorktreeDiscoveryTests
         Assert.True(wts[0].IsMain);
         Assert.False(wts[1].IsMain);
         Assert.Equal("master", wts[0].Branch);
-        Assert.Equal("ROCKALLEY", wts[1].Branch);
+        Assert.Equal("FEATURE", wts[1].Branch);
         // Roots normalized to full paths (platform separators).
         Assert.EndsWith("LIB", wts[0].Root.TrimEnd('\\', '/'));
-        Assert.EndsWith("LIB-rockalley", wts[1].Root.TrimEnd('\\', '/'));
+        Assert.EndsWith("LIB-FEATURE", wts[1].Root.TrimEnd('\\', '/'));
     }
 
     [Fact]
@@ -58,7 +58,7 @@ public class WorktreeDiscoveryTests
     public void SubPath_RegisteredRootUnderTop_IsPreserved()
     {
         // LIB/myapp is a SUBDIR of the LIB git repo — the subpath must carry
-        // across to each worktree (LIB-rockalley/myapp).
+        // across to each worktree (LIB-FEATURE/myapp).
         Assert.Equal("myapp",
             GitWorktrees.SubPath(@"C:\a\LIB", @"C:\a\LIB\myapp").Replace('\\', '/'));
     }
@@ -78,11 +78,11 @@ public class WorktreeDiscoveryTests
         Assert.Equal(2, dirs.Count);
         Assert.True(dirs[0].IsMain);
         Assert.EndsWith("LIB" + Path.DirectorySeparatorChar + "myapp", dirs[0].Root);
-        Assert.EndsWith("LIB-rockalley" + Path.DirectorySeparatorChar + "myapp", dirs[1].Root);
-        Assert.Equal("ROCKALLEY", dirs[1].Branch);
+        Assert.EndsWith("LIB-FEATURE" + Path.DirectorySeparatorChar + "myapp", dirs[1].Root);
+        Assert.Equal("FEATURE", dirs[1].Branch);
     }
 
-    // The parser bug that made the ROCKALLEY spec invisible: a scratchpad accumulates
+    // The parser bug that made the FEATURE spec invisible: a scratchpad accumulates
     // one `## Documents` section per checkpoint, but the parser stopped at the first
     // heading after the first section — so any doc declared in a LATER section was
     // never read. Every section's declarations must be returned.

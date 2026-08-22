@@ -171,7 +171,22 @@ exit 0
     //   - backslashes preceding a `"` doubled, per msvcrt rules
     //   - internal `"` escaped as `\"`
     //   - trailing backslashes doubled so the closing quote isn't escaped
-    internal static string EscapeForCmdQuoted(string s)
+    /// <summary>
+    /// A task prompt rides to claude as ONE quoted positional argument through cmd.exe,
+    /// and cmd ends the command line at the first newline — everything after it is
+    /// silently dropped. ShellDisciplinePreamble ends in "\n\n", so from 5dea3fb
+    /// (2026-08-09) every orchestrator-dispatched session received the preamble and
+    /// nothing else: the task never arrived. Paragraph breaks become " | " so the
+    /// structure survives; single line breaks become a space.
+    /// </summary>
+    public static string FlattenForCommandLine(string s)
+    {
+        var t = s.Replace("\r\n", "\n").Replace('\r', '\n');
+        while (t.Contains("\n\n\n")) t = t.Replace("\n\n\n", "\n\n");
+        return t.Replace("\n\n", " | ").Replace('\n', ' ').Trim();
+    }
+
+    public static string EscapeForCmdQuoted(string s)
     {
         var sb = new System.Text.StringBuilder(s.Length + 8);
         int backslashes = 0;
@@ -536,7 +551,19 @@ exit 0
             // session sits idle until someone types. Skip when prompt is empty
             // to preserve the interactive "open and wait" path.
             if (!string.IsNullOrEmpty(prompt))
-                claudeArgs += $" \"{EscapeForCmdQuoted(prompt)}\"";
+                claudeArgs += $" \"{EscapeForCmdQuoted(FlattenForCommandLine(prompt))}\"";
+
+            // Ledger context (see BuildLedgerEnvSet), so an agent can run
+            // `huddle --claim <path>` with no arguments beyond the paths themselves.
+            //
+            // Deliberately OUTSIDE the mail-hook try/catch below. The ledger vars
+            // need nothing from the hook setup, and folding them in there would make
+            // a hook-file write failure silently strip a session's ledger identity —
+            // every `huddle --claim` in it would then fail while the log talked only
+            // about mail. Two unrelated features must not share one failure path.
+            // Do not "tidy" this back into the block below.
+            var ledgerEnvSet = BuildLedgerEnvSet(
+                instance.InstanceId, instance.RepoName, instance.SessionId?.ToString() ?? "", instance.Root);
 
             // Mail-delivery hooks. Instead of typing wake lines into this console
             // (which stomped an operator's in-progress prompt), huddle appends them
@@ -607,7 +634,14 @@ exit 0
             }
 
             // Env vars exported to the child Claude Code process:
-            //   BUN_CRASH_REPORTER_URL — silenced so Bun crash dialogs stay inside this session
+            //   BUN_CRASH_REPORTER_URL — silenced so Bun crash dialogs stay inside this session.
+            //   NOTE: this one assignment is deliberately NOT quoted, unlike every other `set`
+            //   below. `set "VAR="` DELETES a variable in cmd — there is no way to define one as
+            //   empty — and a deleted BUN_CRASH_REPORTER_URL means Bun falls back to its DEFAULT
+            //   crash-reporter endpoint, i.e. an offline-first tool starts phoning home. The
+            //   unquoted form assigns a single space, which is defined and non-empty, so the
+            //   default never applies. Quoting it to "match the others" would restore the very
+            //   behaviour it exists to prevent. Do not tidy it.
             //   CLAUDE_SESSION_LABEL  — literal statusline label (used by ~/.claude/statusline.ps1)
             //   CLAUDE_PERSONA        — persona name, for scripts/tools inside the session
             // The leading `title` makes the console window identifiable in Alt+Tab
@@ -618,6 +652,7 @@ exit 0
             var envPrefix = $"title huddle: {instanceId} && " +
                             "set BUN_CRASH_REPORTER_URL= && " +
                             $"set CLAUDE_SESSION_LABEL={instanceId} && " +
+                            ledgerEnvSet +
                             hookPendingSet +
                             gitAuthSet;
             if (!string.IsNullOrEmpty(persona))
@@ -682,6 +717,73 @@ exit 0
             if (!started && isNewInstance)
                 _instances.Remove(instanceId);
         }
+    }
+
+    /// <summary>
+    /// The ledger context a session needs to claim files, as a cmd `set` prefix. Used by
+    /// every launch path — spawn AND both resumes — because resume is the recovery path
+    /// taken after exactly the kind of outage the ledger exists to survive, and a session
+    /// that cannot run `huddle --claim` is invisible to its peers in the same silent way
+    /// the 2026-08-16 incident was (ISSUES.md I011).
+    ///
+    /// Exports, in order:
+    /// <list type="bullet">
+    /// <item>huddle's own directory PREPENDED to PATH, so bare `huddle --claim` resolves;</item>
+    /// <item><c>HUDDLE_EXE</c>, the full executable path — the guaranteed form. The agent's
+    /// Bash tool runs Git Bash initialised from the user's profile, and a login shell's
+    /// /etc/profile can rebuild PATH from scratch and drop the prepended entry;</item>
+    /// <item>ledger location + identity: <c>HUDDLE_CLAIMS</c> (absolute — the agent's cwd is
+    /// its repo, not huddle's), <c>HUDDLE_INSTANCE</c>, <c>HUDDLE_REPO</c>, <c>HUDDLE_GUID</c>;</item>
+    /// <item><c>HUDDLE_REPO_ROOT</c>, the session's ACTUAL checkout directory. A repo NAME
+    /// cannot name a git worktree — `lib-feature` is a worktree of `lib`, not a registered
+    /// repo — so a session working in one had no way to say where it was, and its claims
+    /// resolved to the wrong checkout for every reader (ISSUES.md I014). The root is recorded
+    /// on the claim itself; the name stays for display and for the fallback.</item>
+    /// </list>
+    ///
+    /// <see cref="Environment.ProcessPath"/>, not <c>AppContext.BaseDirectory</c>:
+    /// PublishSingleFile is enabled (src/huddle.csproj), where BaseDirectory is not
+    /// reliably the executable's directory. Same precedent as the credential logger below.
+    ///
+    /// With no IPC there is no ledger, so the four vars are explicitly CLEARED rather than
+    /// left alone: the child inherits huddle's OWN environment, and an inherited
+    /// HUDDLE_CLAIMS/HUDDLE_INSTANCE would file this session's claims under the parent
+    /// instance's name — a claim that misnames its holder is worse than no claim. An empty
+    /// assignment deletes the variable in cmd.
+    ///
+    /// Quote the whole assignment: `set VAR=value &amp;&amp; ...` captures everything up to the
+    /// `&amp;&amp;`, trailing space included. The quotes are not part of the value. Quoting does
+    /// NOT save a directory containing `%`, `&amp;` or `^` — `%` would expand mid-parse and the
+    /// others are cmd metacharacters — so a huddle installed under such a path would break
+    /// this prefix. `%PATH%` is left for cmd to expand at launch (it costs 6 characters of
+    /// the command line rather than the whole expanded PATH).
+    /// </summary>
+    private string BuildLedgerEnvSet(string instanceId, string repoName, string sessionGuid, string repoRoot)
+    {
+        var set = "";
+        var huddleExe = Environment.ProcessPath;
+        if (!string.IsNullOrEmpty(huddleExe))
+        {
+            var huddleDir = Path.GetDirectoryName(huddleExe);
+            if (!string.IsNullOrEmpty(huddleDir))
+                set += $"set \"PATH={huddleDir};%PATH%\" && ";
+            set += $"set \"HUDDLE_EXE={huddleExe}\" && ";
+        }
+
+        if (Ipc == null)
+            return set +
+                   "set \"HUDDLE_CLAIMS=\" && " +
+                   "set \"HUDDLE_INSTANCE=\" && " +
+                   "set \"HUDDLE_REPO=\" && " +
+                   "set \"HUDDLE_REPO_ROOT=\" && " +
+                   "set \"HUDDLE_GUID=\" && ";
+
+        return set +
+               $"set \"HUDDLE_CLAIMS={Ipc.ClaimsDir}\" && " +
+               $"set \"HUDDLE_INSTANCE={instanceId}\" && " +
+               $"set \"HUDDLE_REPO={repoName}\" && " +
+               $"set \"HUDDLE_REPO_ROOT={repoRoot}\" && " +
+               $"set \"HUDDLE_GUID={sessionGuid}\" && ";
     }
 
     /// <summary>
@@ -917,8 +1019,13 @@ exit 0
     /// <summary>
     /// Open `claude --resume &lt;session-id&gt;` for a tracked session in a fresh console,
     /// with the working directory set to the session's repo root (Claude keys session
-    /// storage by cwd). This is a convenience launcher — the resumed CLI is NOT adopted
-    /// as a managed instance; it's the operator picking a prior conversation back up.
+    /// storage by cwd), and ADOPT the launched console back into the roster as that
+    /// instance's live process (<see cref="AdoptResumed"/>).
+    /// <para>Adoption is not a convenience: a resumed session does real work and claims
+    /// files, and a claim whose owner is missing from the live roster is classified as an
+    /// orphan and archived while the agent is still working. Consequences the operator
+    /// approved: a resumed session appears in `status`, counts as live, and `stop` will
+    /// kill it.</para>
     /// Returns false if the instance is unknown or carries no session id.
     /// </summary>
     public bool Resume(string id)
@@ -937,6 +1044,8 @@ exit 0
         // Refuse to resume a session that's still alive: a second `claude` on the same
         // session-id + cwd means two live writers on one transcript JSONL, which forks
         // and can corrupt the conversation. Resume is for stopped/crashed sessions.
+        // Adoption makes this guard STRONGER: a previously resumed session is now a live
+        // instance, so a second resume of it is refused here instead of silently forking.
         if (instance.IsAlive)
         {
             _log($"resume: {instance.InstanceId} is still running — 'focus {instance.InstanceId}' to jump to it, or stop it first.");
@@ -944,8 +1053,15 @@ exit 0
         }
 
         // Mirror the launch shape of Start: cmd.exe wrapper, identifiable title,
-        // Bun crash reporter silenced, own console via UseShellExecute.
-        var envPrefix = $"title huddle-resume: {instance.InstanceId} && set BUN_CRASH_REPORTER_URL= && ";
+        // Bun crash reporter silenced, own console via UseShellExecute — and the same
+        // ledger context, because a resumed session does real work and must be able to
+        // claim it. The launched console is then adopted as this instance's process, so
+        // the claim arbiter's live roster includes it: unadopted, its claims looked like
+        // orphans and the reaper archived them mid-session — and because HandleClaim
+        // reaps before computing overlaps, the next claimant on the same file archived
+        // the resumed agent's claim and was told there was no overlap (a false all-clear).
+        var envPrefix = $"title huddle-resume: {instance.InstanceId} && set BUN_CRASH_REPORTER_URL= && " +
+                        BuildLedgerEnvSet(instance.InstanceId, instance.RepoName, instance.SessionId.Value.ToString(), instance.Root);
         var psi = new ProcessStartInfo
         {
             FileName = "cmd.exe",
@@ -956,8 +1072,25 @@ exit 0
 
         try
         {
-            Process.Start(psi);
-            _log($"resume: launched {instance.ResumeCommand}  (in {instance.Root})");
+            var proc = Process.Start(psi);
+            if (proc == null)
+            {
+                // UseShellExecute can hand back null (the shell satisfied the request
+                // without starting a new process we own). The console DID launch — only
+                // adoption failed — so this is still a successful resume, with exactly
+                // the tracking huddle had before adoption existed. Say so, loudly.
+                _log($"resume: launched {instance.ResumeCommand}  (in {instance.Root}) — " +
+                     "no process handle returned, so it is NOT tracked: it will not show in `status`, " +
+                     "and its claims will look like orphans to the reaper.");
+                return true;
+            }
+
+            // Read the PID before adopting: adoption hands `proc` to MonitorProcess, which
+            // disposes it the moment the session exits, and a disposed Process throws on Id.
+            var pid = proc.Id;
+            AdoptResumed(instance, proc);
+            _log($"resume: launched {instance.ResumeCommand}  (in {instance.Root}) — " +
+                 $"adopted as live instance '{instance.InstanceId}' (PID {pid}).");
             return true;
         }
         catch (Exception ex)
@@ -968,10 +1101,67 @@ exit 0
     }
 
     /// <summary>
+    /// Adopt a just-launched resume console as an existing instance's live process, so the
+    /// resumed session is a tracked, live member of the roster the claim arbiter reads.
+    /// Both resume paths use this.
+    /// <para>The sequence is the registration tail of <see cref="Start"/> — dispose the
+    /// stale handle from the previous run, take the new process, reset the run stamps, go
+    /// Running — with <see cref="Recover"/>'s log-directory derivation (<c>_dataDir</c> +
+    /// <c>SafePathName</c>) and <see cref="Recover"/>'s monitor-then-announce ordering.</para>
+    /// <para>Unlike <see cref="Recover"/>, which builds a brand-new instance nobody can see
+    /// yet, this instance is already in <c>_instances</c> and <see cref="Poll"/> may be
+    /// reading it on the timer thread — hence the lock, which is the same lock
+    /// <see cref="Start"/> holds across its own registration tail.</para>
+    /// <para>On exit <see cref="MonitorProcess"/> flips the instance to Stopped (or Crashed)
+    /// and raises <c>SessionStateChanged</c>, which is what auto-releases the session's
+    /// claims — the resumed session gets the same end-of-life handling as a spawned one.</para>
+    /// </summary>
+    private void AdoptResumed(SessionInstance instance, Process proc)
+    {
+        var logDir = Path.Combine(_dataDir, instance.SafePathName);
+        // Best effort, and deliberately not allowed to throw: the console is ALREADY
+        // running by the time we get here, so a failure to make the log directory must
+        // not abort adoption and leave a live session untracked. MonitorProcess only
+        // uses logDir to write a crash log, and guards that write itself.
+        try { Directory.CreateDirectory(logDir); }
+        catch (Exception ex)
+        {
+            _log($"[{instance.InstanceId}] resume: could not create log dir {logDir} ({ex.Message}) — crash logs for this run may be lost.");
+        }
+
+        lock (instance.Lock)
+        {
+            instance.Process?.Dispose();
+            instance.Process = proc;
+            instance.StartedAt = DateTime.Now;
+            instance.StoppedAt = null;
+            instance.LastExitCode = null;
+            instance.Status = SessionStatus.Running;
+
+            // Monitor in background FIRST, then announce — Recover's ordering (:984-986),
+            // and here it is load-bearing rather than stylistic. SessionStateChanged
+            // handlers do real work: Program.cs's handler calls SessionState.Save, which
+            // dereferences i.Process!.Id for every live instance outside the try that
+            // guards the other process reads (SessionState.cs:75 vs :85). A throw there
+            // would skip the Task.Run and unwind into Resume's catch, which would log
+            // "resume: failed to launch" and return false about a console that is adopted
+            // and running. Dispatching the monitor first makes the announce unable to cost
+            // us the monitor.
+            _ = Task.Run(() => MonitorProcess(instance, proc, logDir));
+
+            SessionStateChanged?.Invoke(instance, SessionStatus.Running);
+        }
+    }
+
+    /// <summary>
     /// Resume a session known only by its transcript (the `history` verb) — it may
     /// never have been one of this huddle's instances. Same live-writer guard as
     /// the instance-based resume: if any tracked instance is alive on this session
     /// id, refuse (two writers fork/corrupt the transcript JSONL).
+    /// <para>When the transcript DOES belong to a tracked instance, the launched console
+    /// is adopted as that instance's live process (<see cref="AdoptResumed"/>), so its
+    /// claims are held by a session the live roster can see. When it belongs to none,
+    /// nothing is adopted — there is no identity to adopt it as.</para>
     /// </summary>
     public bool ResumeTranscript(string sessionId, string cwd)
     {
@@ -990,17 +1180,52 @@ exit 0
         }
 
         var workDir = Directory.Exists(cwd) ? cwd : ".";
+        // Same ledger context as every other launch path. A transcript resume may not
+        // correspond to any tracked instance; when it does, borrow that instance's
+        // identity so its claims are attributed to the name everything else knows it by
+        // — and adopt the console back into that instance below, so the roster agrees
+        // with the name the claims carry. When it does not, HUDDLE_INSTANCE is empty and
+        // `huddle --claim` refuses loudly rather than writing an ownerless claim — the
+        // fail-loud direction, and the reason there is nothing to adopt in that case.
+        var known = _instances.Values.FirstOrDefault(i => i.SessionId.HasValue && i.SessionId.Value == guid);
+        var envPrefix2 = $"title huddle-resume: {guid} && set BUN_CRASH_REPORTER_URL= && " +
+                         BuildLedgerEnvSet(known?.InstanceId ?? "", known?.RepoName ?? "", guid.ToString(), known?.Root ?? "");
         var psi2 = new ProcessStartInfo
         {
             FileName = "cmd.exe",
-            Arguments = $"/c title huddle-resume: {guid} && set BUN_CRASH_REPORTER_URL= && \"{_claudePath}\" --resume {guid}",
+            Arguments = $"/c {envPrefix2}\"{_claudePath}\" --resume {guid}",
             WorkingDirectory = workDir,
             UseShellExecute = true,
         };
         try
         {
-            Process.Start(psi2);
-            _log($"resume: launched claude --resume {guid}  (in {workDir})");
+            var proc = Process.Start(psi2);
+            if (proc == null)
+            {
+                // See Resume: the console launched, only adoption failed.
+                _log($"resume: launched claude --resume {guid}  (in {workDir}) — " +
+                     "no process handle returned, so it is NOT tracked.");
+                return true;
+            }
+
+            if (known != null)
+            {
+                // PID first — see Resume: MonitorProcess disposes `proc` on exit.
+                var pid = proc.Id;
+                AdoptResumed(known, proc);
+                _log($"resume: launched claude --resume {guid}  (in {workDir}) — " +
+                     $"adopted as live instance '{known.InstanceId}' (PID {pid}).");
+            }
+            else
+            {
+                // No tracked instance owns this transcript, so there is nothing to adopt
+                // it AS. Deliberately unchanged: HUDDLE_INSTANCE is empty, so
+                // `huddle --claim` refuses loudly rather than writing an ownerless claim.
+                proc.Dispose();
+                _log($"resume: launched claude --resume {guid}  (in {workDir}) — " +
+                     "no tracked instance owns this transcript, so it is not adopted " +
+                     "(it cannot claim files: `huddle --claim` will refuse).");
+            }
             return true;
         }
         catch (Exception ex)

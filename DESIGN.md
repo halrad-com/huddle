@@ -571,10 +571,11 @@ This is **prompt-driven** — agents write it themselves as a convention, and ot
 read it before editing to avoid conflicts. Written to by personas; parsed by
 `HandleConflicts`. Best for long-running sessions that want to declare scope loosely.
 
-### Orchestrator-owned claims
+### Structured claims
 
-When `dispatch-batch` fires, huddle writes a structured claim file itself at
-`ipc/workledger/claims/<batchId>-<session>.md`:
+A claim is a file at `ipc/workledger/claims/<batchId>-<session>.md`. Agents write these
+themselves (`huddle --claim`, below); huddle also writes one per unit when
+`dispatch-batch` spawns it:
 
 ```markdown
 # B-20260422-001500-myapp_backenddev
@@ -589,10 +590,60 @@ When `dispatch-batch` fires, huddle writes a structured claim file itself at
   - docs/bar.md
 ```
 
-This is **orchestrator-driven** — agents don't write these. `dispatch-batch` enqueues a
-batch into a work queue and dispatches the units that are immediately dispatchable
-(writing a claim per spawned unit); overlapping or dependency-blocked units stay queued
-and dispatch on a later advance. See [Conflict-guarding work queue](#conflict-guarding-work-queue).
+This was **orchestrator-driven** until 2026-08-16 — agents mailed a `claim` command and
+waited for huddle to write the file for them. With huddle down the mail sat unread, no
+claim was ever recorded, and two sessions worked the same files invisible to each other
+(ISSUES.md I011). **Agents now write claims directly**; huddle is an observer of the same
+ledger, not a gatekeeper on the way into it. Two routes, one meaning:
+
+- **`huddle --claim` / `--release` / `--ledger`** — the primary route. See
+  [Direct ledger access](#direct-ledger-access-huddle---claim).
+- **`dispatch-batch`** — huddle writes a claim per unit it spawns, because the batch
+  already declared each task's file set up front. It enqueues the batch into a work queue
+  and dispatches the immediately-dispatchable units; overlapping or dependency-blocked
+  units stay queued and dispatch on a later advance. See
+  [Conflict-guarding work queue](#conflict-guarding-work-queue).
+- The mail `claim` command still works and behaves the same way — it records and reports,
+  and always acks. `nack:claim` no longer means contention; it means a malformed request.
+
+### Direct ledger access (`huddle --claim`)
+
+Three argument modes on the binary. They **run huddle.exe and never contact a running
+huddle**, which is the whole point: a claim lands whether or not the console is up.
+
+| Mode | What it does |
+|------|--------------|
+| `huddle --claim <repo-relative-path> [more...]` | Records the claim and prints every OTHER session already holding any of those files (`ALSO HELD BY <session> since <time>`). It **never refuses** — an overlap is reported, not denied, because refusing needs an arbiter alive and reporting does not. Exit 0. |
+| `huddle --release <repo-relative-path> [more...]` | Removes those files from the caller's OWN claims; another session's claim on the same file is untouched. A claim with nothing left is deleted. |
+| `huddle --ledger [repo]` | Prints one line per claimed file — what, by whom, since when. The read-before-you-work view. With a repo argument that matches nothing while claims exist elsewhere, it says so rather than printing an all-clear. |
+
+Identity and ledger location arrive as environment variables exported at spawn (and on
+both resume paths), so the agent types only paths: `HUDDLE_CLAIMS` (absolute claims dir),
+`HUDDLE_INSTANCE`, `HUDDLE_REPO`, `HUDDLE_GUID`. Launch also prepends huddle's own
+directory to `PATH` and exports `HUDDLE_EXE` with the full executable path — a protocol
+the agent cannot invoke fails exactly like the outage it exists to survive.
+
+**Resume is adopted, not fire-and-forget.** A resumed console is registered as its
+instance's live process (`SessionManager.AdoptResumed`, used by both `resume` paths), for
+the same reason it gets ledger context: it does real work and claims files. The claim
+arbiter's live roster is `Instances.Values.Where(i => i.IsAlive)`, so an unadopted resume
+would be absent from it, its claims would be classified as orphans, and the reaper would
+archive them mid-session — and since the reap runs *before* the overlap scan, the next
+claimant on the same file would archive the resumed agent's claim and then be told there
+was no overlap. Adoption means a resumed session shows in `status`, counts as live, and
+`stop` kills it, and its exit runs the ordinary stop path that auto-releases its claims.
+The one case left unadopted is a `history`/`find` resume of a transcript that belongs to
+no tracked instance: there is no identity to adopt it as, `HUDDLE_INSTANCE` is empty, and
+`huddle --claim` refuses loudly rather than writing an ownerless claim.
+
+Exit codes: `0` success, `2` usage error (no paths, an absolute path, missing
+`HUDDLE_CLAIMS`/`HUDDLE_INSTANCE`), `3` the operation failed and **nothing was recorded**.
+Paths must be repo-relative: claims are matched relative to a repo, so an absolute path
+records something that can never collide with another session's `src/a.cs`.
+
+Non-goals, decided in the spec and worth restating because each looks tempting: no lock
+primitive, no queue of waiters, no scheduler or lease, no ordered acquisition, no
+enforcement hook. Turn-taking is a conversation between two named agents, not a mechanism.
 
 ### Dispatch flow
 
@@ -630,14 +681,16 @@ gate, and cross-machine sync are explicit non-goals for v1.
 
 ### Release
 
-Agents call `release` after committing a unit of work:
+Agents release after committing a unit of work. Preferred form is
+`huddle --release src/Foo.cs`, which writes the ledger directly and works with huddle
+down. The mail form still works and does the same thing:
 
 ```json
 { "subject": "release", "body": { "files": ["src/Foo.cs"] } }
 ```
 
-Huddle removes the listed files from the agent's claim(s). If a claim has no files
-remaining, the claim file is deleted.
+Either way the listed files are removed from the caller's own claim(s). If a claim has no
+files remaining, the claim file is deleted.
 
 ### Auto-release on session stop
 
@@ -653,9 +706,15 @@ When `SessionManager` fires `SessionStateChanged` with `Stopped` or `Crashed`, h
 5. Marks the claim's work unit `Done` (via the claim's `BatchId` → unit id) and calls
    `AdvanceQueue`, so dependent or previously-overlapping queued units can now dispatch.
 
-The audit is informational — it never reverts agent work. The whole path is synchronised
-via a private lock in `WorkLedgerClaims` so a concurrent `dispatch-batch` from the
+The audit is informational — it never reverts agent work. Every `WorkLedgerClaims`
+operation takes a private in-process lock, so a concurrent `dispatch-batch` from the
 inbox-watcher thread cannot race with an auto-release from the session-state poll thread.
+That lock is per-process and therefore not enough on its own now that separate huddle
+processes write the ledger: `RecordWithOverlaps` — the path both `huddle --claim` and the
+mail `claim` command take — additionally holds a machine-scoped named mutex (`Local\huddle-ledger-<hash-of-claims-dir>`)
+across its read-compare-write, so two simultaneous claimants each see the other instead of
+both seeing an empty ledger. Every mutex failure (timeout, abandoned, or unopenable)
+degrades to recording unguarded; it never refuses the claim.
 
 ### Commit-then-release idiom
 
@@ -679,8 +738,10 @@ banner announces `N session(s) recoverable — 'recover' to list.`
 at spawn from the task prompt; falls back to the transcript's opening user turn),
 **last evidence** (transcript last-write), and the ready-to-run resume command.
 `recover <n>` / `recover all` relaunch via the same spawn path as `resume` (still
-refusing live sessions); `recover dismiss` archives. Nothing is ever deleted — removals
-append to `logs/state-archive.jsonl`.
+refusing live sessions), and inherit its adoption: when the transcript belongs to a
+tracked instance, the relaunched console becomes that instance's live process; when it
+belongs to none, it launches untracked and unable to claim. `recover dismiss` archives.
+Nothing is ever deleted — removals append to `logs/state-archive.jsonl`.
 
 **Topology-aware ordering:** workers report to hubs (the session that dispatched them,
 the lane-lead holding unread mail). The listing derives lineage from dispatch-batch
@@ -886,7 +947,7 @@ run it from the repo root or use `--config` to point at the config.
 | `shell [<repo>] <data>` | Hand `<data>` to the OS shell (`ShellExecute`) — opens files, URLs, folders. Optional repo sets working directory. Fire-and-forget. | `shell app deploy\\build.cmd` |
 | `tasks` | Show all tracked tasks with state (pending, delegated, in-progress, completed, failed), assignee, and description. | `tasks` |
 | `progress` | Show the last scratchpad checkpoint for each running session. Sessions write checkpoints to `logs/<name>/scratchpad.md` as they work. | `progress` |
-| `conflicts` | Show file claim overlaps across sessions. Reads both the freeform `workledger/*.md` files and the orchestrator-owned `workledger/claims/` files; lists active orchestrator claims even when no overlap. | `conflicts` |
+| `conflicts` | Show file claim overlaps across sessions. Reads both the freeform `workledger/*.md` files and the structured `workledger/claims/` files — written by agents via `huddle --claim` and by the orchestrator for dispatched work; lists active claims even when no overlap. | `conflicts` |
 | `replay <repo>` | Run the repo's captured regression tests (MBXHVAL capture suites in `MBXHVAL/tests/suites/captures/`) against its live test instance via `mbxhval`, and report pass/fail. Needs `mbxhvalPath` in `huddle.json`. See [Capture Replay](#capture-replay-replay-verb). | `replay myapp` |
 | `docs [plans\|churn]` | List artifacts sessions declared in their scratchpads, newest first. Default = Docs (deliverables); `plans` adds Plans; `churn` adds git working-tree changes (binaries/build output filtered). Clickable (OSC 8) with `open <n>` fallback. See [Document log](#document-log). | `docs churn` |
 | `open <n>` | Open the nth entry from the last `docs` listing via the OS file handler. | `open 1` |

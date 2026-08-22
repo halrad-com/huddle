@@ -65,11 +65,11 @@ public class ContentSearchTests : IDisposable
     public void Docs_MatchesByBodyContent()
     {
         var d = Dir("docs");
-        var hit = WriteFile(d, "spec.md", "# Overlay spec\nthe rockalley overlay design\n");
+        var hit = WriteFile(d, "spec.md", "# Overlay spec\nthe FEATURE overlay design\n");
         var miss = WriteFile(d, "other.md", "# Unrelated\nnothing here\n");
         var cs = Make(new FakeDocs(Doc("Overlay spec", hit), Doc("Unrelated", miss)));
 
-        var r = cs.Search("rockalley", null, null);
+        var r = cs.Search("FEATURE", null, null);
 
         Assert.Single(r.Docs);
         Assert.Equal(hit, r.Docs[0].Path);
@@ -79,9 +79,9 @@ public class ContentSearchTests : IDisposable
     public void Docs_MetadataMatchStillHitsWhenBodyUnreadable()
     {
         var gone = Path.Combine(_root, "does-not-exist.md");
-        var cs = Make(new FakeDocs(Doc("rockalley plan", gone)));
+        var cs = Make(new FakeDocs(Doc("FEATURE plan", gone)));
 
-        var r = cs.Search("rockalley", null, null);
+        var r = cs.Search("FEATURE", null, null);
 
         Assert.Single(r.Docs);   // title matched; missing body is not fatal
     }
@@ -90,15 +90,15 @@ public class ContentSearchTests : IDisposable
     public void Docs_RepoAndCutoffFiltersApply()
     {
         var d = Dir("docs");
-        var a = WriteFile(d, "a.md", "rockalley\n");
-        var b = WriteFile(d, "b.md", "rockalley\n");
+        var a = WriteFile(d, "a.md", "FEATURE\n");
+        var b = WriteFile(d, "b.md", "FEATURE\n");
         var old = DateTime.Now.AddDays(-30);
         var cs = Make(new FakeDocs(
             Doc("A", a, repo: "alpha"),
             Doc("B", b, repo: "beta", ts: old)));
 
-        Assert.Single(cs.Search("rockalley", "alpha", null).Docs);
-        Assert.Empty(cs.Search("rockalley", "beta", DateTime.Now.AddDays(-1)).Docs);
+        Assert.Single(cs.Search("FEATURE", "alpha", null).Docs);
+        Assert.Empty(cs.Search("FEATURE", "beta", DateTime.Now.AddDays(-1)).Docs);
     }
 
     [Fact]
@@ -129,12 +129,12 @@ public class ContentSearchTests : IDisposable
     public void Sessions_HitCountsMatchingLines_AndParsesSummary()
     {
         WriteTranscript("aaa",
-            TranscriptLine("working on rockalley overlay"),
-            TranscriptLine("more rockalley work"),
+            TranscriptLine("working on FEATURE overlay"),
+            TranscriptLine("more FEATURE work"),
             TranscriptLine("unrelated"));
         WriteTranscript("bbb", TranscriptLine("nothing relevant"));
 
-        var r = Make().Search("rockalley", null, null);
+        var r = Make().Search("FEATURE", null, null);
 
         Assert.Single(r.Sessions);
         Assert.Equal(2, r.Sessions[0].MatchCount);
@@ -145,9 +145,9 @@ public class ContentSearchTests : IDisposable
     [Fact]
     public void Sessions_LiveLookupIsThreadedThrough()
     {
-        WriteTranscript("ccc", TranscriptLine("rockalley"));
+        WriteTranscript("ccc", TranscriptLine("FEATURE"));
         var r = Make(live: sid => sid == "ccc" ? "alpha:architect" : null)
-            .Search("rockalley", null, null);
+            .Search("FEATURE", null, null);
 
         Assert.Single(r.Sessions);
         Assert.Equal("alpha:architect", r.Sessions[0].LiveInstanceId);
@@ -159,11 +159,11 @@ public class ContentSearchTests : IDisposable
         // Two matching transcripts; only the recent one may survive the cutoff. The
         // recent hit is what makes this a real guard rather than an assert-nothing test:
         // a broken sessions search would fail it, not pass it.
-        var old = WriteTranscript("ddd", TranscriptLine("rockalley"));
+        var old = WriteTranscript("ddd", TranscriptLine("FEATURE"));
         File.SetLastWriteTime(old, DateTime.Now.AddDays(-30));
-        WriteTranscript("eee", TranscriptLine("rockalley"));   // mtime = now, enumerated first
+        WriteTranscript("eee", TranscriptLine("FEATURE"));   // mtime = now, enumerated first
 
-        var r = Make().Search("rockalley", null, DateTime.Now.AddDays(-1));
+        var r = Make().Search("FEATURE", null, DateTime.Now.AddDays(-1));
 
         Assert.Single(r.Sessions);
         Assert.Equal("eee", r.Sessions[0].Summary.Id);
@@ -178,9 +178,9 @@ public class ContentSearchTests : IDisposable
     [Fact]
     public void Sessions_TranscriptDeletedMidScanDoesNotKillTheRestOfTheCorpus()
     {
-        var newest = WriteTranscript("n1", TranscriptLine("rockalley"));
-        var doomed = WriteTranscript("n2", TranscriptLine("rockalley"));
-        var behind = WriteTranscript("n3", TranscriptLine("rockalley"));
+        var newest = WriteTranscript("n1", TranscriptLine("FEATURE"));
+        var doomed = WriteTranscript("n2", TranscriptLine("FEATURE"));
+        var behind = WriteTranscript("n3", TranscriptLine("FEATURE"));
         File.SetLastWriteTime(newest, DateTime.Now);
         File.SetLastWriteTime(doomed, DateTime.Now.AddHours(-1));
         File.SetLastWriteTime(behind, DateTime.Now.AddHours(-2));
@@ -193,7 +193,7 @@ public class ContentSearchTests : IDisposable
         }, log: logs.Add);
 
         // Cutoff must be set for the early-break path to be live at all.
-        var r = cs.Search("rockalley", null, DateTime.Now.AddDays(-1));
+        var r = cs.Search("FEATURE", null, DateTime.Now.AddDays(-1));
 
         Assert.Equal(new[] { "n1", "n3" }, r.Sessions.Select(h => h.Summary.Id).ToArray());
         Assert.Contains(logs, m => m.Contains("n2"));   // skipped loudly, never silently
@@ -205,11 +205,11 @@ public class ContentSearchTests : IDisposable
     public void Notes_CountsMentionsAndNamesSession()
     {
         var pad = Dir("logs", "alpha_architect");
-        WriteFile(pad, "scratchpad.md", "## Checkpoint\nrockalley started\nrockalley done\n");
+        WriteFile(pad, "scratchpad.md", "## Checkpoint\nFEATURE started\nFEATURE done\n");
         var other = Dir("logs", "beta_reviewer");
         WriteFile(other, "scratchpad.md", "nothing\n");
 
-        var r = Make().Search("rockalley", null, null);
+        var r = Make().Search("FEATURE", null, null);
 
         Assert.Single(r.Notes);
         Assert.Equal("alpha:architect scratchpad", r.Notes[0].Title);
@@ -222,10 +222,10 @@ public class ContentSearchTests : IDisposable
     public void Notes_RepoFilterUsesSafeNamePrefix()
     {
         var pad = Dir("logs", "alpha_architect");
-        WriteFile(pad, "scratchpad.md", "rockalley\n");
+        WriteFile(pad, "scratchpad.md", "FEATURE\n");
 
-        Assert.Single(Make().Search("rockalley", "alpha", null).Notes);
-        Assert.Empty(Make().Search("rockalley", "beta", null).Notes);
+        Assert.Single(Make().Search("FEATURE", "alpha", null).Notes);
+        Assert.Empty(Make().Search("FEATURE", "beta", null).Notes);
     }
 
     // A scratchpad deleted between the directory walk and the mtime read has no mtime —
@@ -237,9 +237,9 @@ public class ContentSearchTests : IDisposable
     public void Notes_FileWithNoMtimeIsSkippedLoudlyNotSilently()
     {
         var goodDir = Dir("logs", "alpha_architect");
-        var good = WriteFile(goodDir, "scratchpad.md", "rockalley started\n");
+        var good = WriteFile(goodDir, "scratchpad.md", "FEATURE started\n");
         var ghostDir = Dir("logs", "alpha_reviewer");
-        var ghost = WriteFile(ghostDir, "scratchpad.md", "rockalley ghost\n");
+        var ghost = WriteFile(ghostDir, "scratchpad.md", "FEATURE ghost\n");
         File.SetLastWriteTime(good, DateTime.Now);
         // 1601-01-02, not 1601-01-01: a FILETIME of exactly 0 means "leave unchanged" to
         // the Win32 API, so setting the literal epoch is a silent no-op. One day past it
@@ -247,7 +247,7 @@ public class ContentSearchTests : IDisposable
         File.SetLastWriteTimeUtc(ghost, new DateTime(1601, 1, 2, 0, 0, 0, DateTimeKind.Utc));
 
         var logs = new List<string>();
-        var r = Make(log: logs.Add).Search("rockalley", null, DateTime.Now.AddDays(-1));
+        var r = Make(log: logs.Add).Search("FEATURE", null, DateTime.Now.AddDays(-1));
 
         Assert.Single(r.Notes);
         Assert.Equal("alpha:architect scratchpad", r.Notes[0].Title);
@@ -263,17 +263,17 @@ public class ContentSearchTests : IDisposable
         WriteFile(inbox, "001-msg.json",
             "{\"from\":\"beta:reviewer\",\"to\":\"alpha:architect\"," +
             "\"timestamp\":\"2026-08-08T10:00:00Z\",\"type\":\"info\"," +
-            "\"subject\":\"rockalley handoff\",\"body\":{}}");
+            "\"subject\":\"FEATURE handoff\",\"body\":{}}");
         var processed = Dir("ipc", "alpha_architect", "processed");
         WriteFile(processed, "002-old.json",
             "{\"from\":\"x\",\"to\":\"y\",\"timestamp\":\"2026-08-01T00:00:00Z\"," +
             "\"type\":\"info\",\"subject\":\"unrelated\",\"body\":{}}");
 
-        var r = Make().Search("rockalley", null, null);
+        var r = Make().Search("FEATURE", null, null);
 
         Assert.Single(r.Mail);
         Assert.Equal("beta:reviewer", r.Mail[0].From);
-        Assert.Equal("rockalley handoff", r.Mail[0].Subject);
+        Assert.Equal("FEATURE handoff", r.Mail[0].Subject);
         Assert.Equal("inbox", r.Mail[0].State);
     }
 
@@ -281,9 +281,9 @@ public class ContentSearchTests : IDisposable
     public void Mail_UnparseableHitFallsBackToFilename()
     {
         var inbox = Dir("ipc", "alpha_architect", "inbox");
-        WriteFile(inbox, "003-broken.json", "{\"subject\":\"rockalley\", not json at all");
+        WriteFile(inbox, "003-broken.json", "{\"subject\":\"FEATURE\", not json at all");
 
-        var r = Make().Search("rockalley", null, null);
+        var r = Make().Search("FEATURE", null, null);
 
         Assert.Single(r.Mail);
         Assert.Equal("003-broken.json", r.Mail[0].Subject);
@@ -302,23 +302,23 @@ public class ContentSearchTests : IDisposable
         WriteFile(Dir("ipc", "alpha_architect", "inbox"), "020-owned.json",
             "{\"from\":\"beta:reviewer\",\"to\":\"alpha:architect\"," +
             "\"timestamp\":\"2026-08-08T12:00:00Z\",\"type\":\"info\"," +
-            "\"subject\":\"rockalley owned\",\"body\":{}}");
+            "\"subject\":\"FEATURE owned\",\"body\":{}}");
         // Owned by gamma, sent by alpha -> From-prefix match.
         WriteFile(Dir("ipc", "gamma_reviewer", "inbox"), "021-sent.json",
             "{\"from\":\"alpha:architect\",\"to\":\"gamma:reviewer\"," +
             "\"timestamp\":\"2026-08-08T11:00:00Z\",\"type\":\"info\"," +
-            "\"subject\":\"rockalley sent\",\"body\":{}}");
+            "\"subject\":\"FEATURE sent\",\"body\":{}}");
         // Neither owned by nor sent from alpha -> rejected.
         WriteFile(Dir("ipc", "gamma_reviewer", "inbox"), "022-foreign.json",
             "{\"from\":\"beta:reviewer\",\"to\":\"gamma:reviewer\"," +
             "\"timestamp\":\"2026-08-08T10:00:00Z\",\"type\":\"info\"," +
-            "\"subject\":\"rockalley foreign\",\"body\":{}}");
+            "\"subject\":\"FEATURE foreign\",\"body\":{}}");
 
-        Assert.Equal(3, Make().Search("rockalley", null, null).Mail.Count);
+        Assert.Equal(3, Make().Search("FEATURE", null, null).Mail.Count);
 
-        var filtered = Make().Search("rockalley", "alpha", null).Mail;
+        var filtered = Make().Search("FEATURE", "alpha", null).Mail;
 
-        Assert.Equal(new[] { "rockalley owned", "rockalley sent" },
+        Assert.Equal(new[] { "FEATURE owned", "FEATURE sent" },
                      filtered.Select(m => m.Subject).OrderBy(s => s, StringComparer.Ordinal).ToArray());
     }
 
@@ -332,20 +332,20 @@ public class ContentSearchTests : IDisposable
         var recent = WriteFile(inbox, "030-recent.json",
             "{\"from\":\"beta:reviewer\",\"to\":\"alpha:architect\"," +
             "\"timestamp\":\"2026-08-08T10:00:00Z\",\"type\":\"info\"," +
-            "\"subject\":\"rockalley recent\",\"body\":{}}");
+            "\"subject\":\"FEATURE recent\",\"body\":{}}");
         var stale = WriteFile(inbox, "031-stale.json",
             "{\"from\":\"beta:reviewer\",\"to\":\"alpha:architect\"," +
             "\"timestamp\":\"2026-08-08T10:00:00Z\",\"type\":\"info\"," +
-            "\"subject\":\"rockalley stale\",\"body\":{}}");
+            "\"subject\":\"FEATURE stale\",\"body\":{}}");
         File.SetLastWriteTime(recent, DateTime.Now);
         File.SetLastWriteTime(stale, DateTime.Now.AddDays(-30));
 
-        Assert.Equal(2, Make().Search("rockalley", null, null).Mail.Count);
+        Assert.Equal(2, Make().Search("FEATURE", null, null).Mail.Count);
 
-        var r = Make().Search("rockalley", null, DateTime.Now.AddDays(-1));
+        var r = Make().Search("FEATURE", null, DateTime.Now.AddDays(-1));
 
         Assert.Single(r.Mail);
-        Assert.Equal("rockalley recent", r.Mail[0].Subject);
+        Assert.Equal("FEATURE recent", r.Mail[0].Subject);
     }
 
     // A mail deleted between Directory.GetFiles and the mtime read has no mtime —
@@ -360,11 +360,11 @@ public class ContentSearchTests : IDisposable
         var good = WriteFile(inbox, "010-good.json",
             "{\"from\":\"beta:reviewer\",\"to\":\"alpha:architect\"," +
             "\"timestamp\":\"2026-08-08T10:00:00Z\",\"type\":\"info\"," +
-            "\"subject\":\"rockalley handoff\",\"body\":{}}");
+            "\"subject\":\"FEATURE handoff\",\"body\":{}}");
         var noMtime = WriteFile(inbox, "011-vanished.json",
             "{\"from\":\"beta:reviewer\",\"to\":\"alpha:architect\"," +
             "\"timestamp\":\"2026-08-08T10:00:00Z\",\"type\":\"info\"," +
-            "\"subject\":\"rockalley ghost\",\"body\":{}}");
+            "\"subject\":\"FEATURE ghost\",\"body\":{}}");
         File.SetLastWriteTime(good, DateTime.Now);
         // 1601-01-02, not 1601-01-01: a FILETIME of exactly 0 means "leave unchanged" to
         // the Win32 API, so setting the literal epoch is a silent no-op. One day past it
@@ -372,10 +372,10 @@ public class ContentSearchTests : IDisposable
         File.SetLastWriteTimeUtc(noMtime, new DateTime(1601, 1, 2, 0, 0, 0, DateTimeKind.Utc));
 
         var logs = new List<string>();
-        var r = Make(log: logs.Add).Search("rockalley", null, DateTime.Now.AddDays(-1));
+        var r = Make(log: logs.Add).Search("FEATURE", null, DateTime.Now.AddDays(-1));
 
         Assert.Single(r.Mail);
-        Assert.Equal("rockalley handoff", r.Mail[0].Subject);
+        Assert.Equal("FEATURE handoff", r.Mail[0].Subject);
         Assert.Contains(logs, m => m.Contains("011-vanished.json"));   // never silent
     }
 }

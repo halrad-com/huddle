@@ -72,6 +72,37 @@ public static class GitHelper
     }
 
     /// <summary>
+    /// The two facts that tell one checkout from another (ISSUES.md I014): the shared git
+    /// object store — identical for every worktree of a repo — and THIS worktree's top.
+    /// Both null on any failure (not a checkout, no git, timeout); the caller treats that as
+    /// "unknown", never as an answer.
+    ///
+    /// One process for both, in argument order, because the pair is always wanted together
+    /// and this runs on the claim path. The common dir may come back relative to
+    /// <paramref name="dir"/> (".git" in a main checkout, "../.git" from a subdirectory of
+    /// one), so it is resolved before being returned.
+    /// </summary>
+    public static (string? Store, string? Top) CheckoutIdentity(string dir)
+    {
+        var (ok, stdout, _) = Run(dir, "rev-parse --git-common-dir --show-toplevel");
+        if (!ok) return (null, null);
+        var lines = stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim())
+            .Where(s => s.Length > 0)
+            .ToList();
+        if (lines.Count < 2) return (null, null);
+        try
+        {
+            var store = Path.IsPathRooted(lines[0]) ? lines[0] : Path.Combine(dir, lines[0]);
+            return (Path.GetFullPath(store), Path.GetFullPath(lines[1]));
+        }
+        catch
+        {
+            return (null, null);
+        }
+    }
+
+    /// <summary>
     /// Returns the path to git's system-level config file (where Git for Windows
     /// puts credential.helper=manager), or null if none is reported. Discovered
     /// once at startup so a per-session config can [include] it faithfully.

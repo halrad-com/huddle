@@ -183,7 +183,19 @@ Available commands agents can send to `_huddle`:
 When two sessions need to edit overlapping files at the same time, they stomp on each other. The Work Ledger solves this at two levels:
 
 - **Freeform ledger** (`ipc/workledger/<session>.md`) — each active session writes what it's working on and which files it's touching. Agents check this before they edit; a prompt convention. Useful for long-running sessions that announce scope declaratively.
-- **Orchestrator claims** (`ipc/workledger/claims/<batch>-<session>.md`) — when `dispatch-batch` spawns a session, huddle writes a structured claim file itself with the session's declared file scope. Auto-released on session stop with a git-diff audit that logs scope creep and uncommitted-dirty files.
+- **Structured claims** (`ipc/workledger/claims/<batch>-<session>.md`) — one file per claim: session, repo, base commit, and the exact file list. Agents write their own with `huddle --claim`; huddle writes one per unit that `dispatch-batch` spawns. Auto-released on session stop with a git-diff audit that logs scope creep and uncommitted-dirty files.
+
+#### Claiming files
+
+These are **argument modes on the binary** — they read and write `ipc/workledger/claims/` directly and never contact a running huddle, so a claim lands whether or not the console is up. That is deliberate: on 2026-08-16 the claim protocol mailed a command to the orchestrator and waited for an ack, huddle was down, the mail sat unread, and two agents worked the same files invisible to each other. There is no arbiter in the write path any more.
+
+| Mode | What it does |
+|------|--------------|
+| `huddle --claim <repo-relative-path> [more...]` | Records the claim, then names every other session already holding any of those files (`ALSO HELD BY <session> since <time>`). **It never refuses** — an overlap is reported, not denied. The two agents mail each other and take turns; nothing arbitrates it for them. |
+| `huddle --release <repo-relative-path> [more...]` | Hands files back after committing. Touches only your own claims. |
+| `huddle --ledger [repo]` | One line per claimed file — what, by whom, since when. The read-before-you-work view. |
+
+Paths must be repo-relative (an absolute path could never match another session's claim on the same file, so it is rejected). Identity and ledger location come from `HUDDLE_CLAIMS` / `HUDDLE_INSTANCE` / `HUDDLE_REPO` / `HUDDLE_GUID`, exported at spawn along with huddle's own directory on `PATH` and `HUDDLE_EXE` — so an agent types only paths. Exit codes: `0` success, `2` usage error, `3` failed and nothing was recorded.
 
 #### Conflict-guarding: serialize, don't reject
 
@@ -251,7 +263,7 @@ Run `help` in huddle for the live version. Current commands:
 | `start <repo> [persona] [prompt]` | Launch a session. Aliases work. Optional persona and opening task prompt. |
 | `stop <instance\|repo>` | Stop one session (by instance ID) or every session of a repo (by name or alias). |
 | `restart <instance>` | Restart a specific session. Keeps the last persona. Uses `--continue` for crash recovery. |
-| `resume <instance>` | Reopen a stopped/crashed session's conversation (`claude --resume <session-id>`) in a fresh console at the repo root. Refuses if the session is still running. |
+| `resume <instance>` | Reopen a stopped/crashed session's conversation (`claude --resume <session-id>`) in a fresh console at the repo root. The reopened session is adopted back into the roster — it shows in `status`, counts as live for the claim ledger, and `stop` will kill it. Refuses if the session is still running. |
 | `repos` | List every registered repo with purpose and aliases. |
 | `personas` | List every available persona. |
 | `status` | Show every active session with status, uptime, and working directory. Color-coded. |
@@ -271,7 +283,7 @@ Run `help` in huddle for the live version. Current commands:
 | `open <n>` | Open the nth document from the last `docs` listing via the OS file handler. |
 | `find <kw> [@repo] [-Nh\|-Nd\|-Nw]` | Content search across doc bodies, session transcripts, scratchpads, and IPC mail — grouped hits, `open <n>` / `resume <n>` interop. |
 | `history [@repo] [kw] [-Nh\|-Nd\|-Nw]` | List past sessions from transcripts; `history <n>` for detail, `resume <n>` to reopen. |
-| `resume <instance\|n>` | Reopen a stopped session's conversation (`claude --resume`) in its repo root. Refuses live sessions. |
+| `resume <instance\|n>` | Reopen a stopped session's conversation (`claude --resume`) in its repo root, adopted back into the roster as a live session (so its file claims are never mistaken for orphans). Refuses live sessions. A transcript that belongs to no tracked instance is launched but not adopted — it cannot claim. |
 | `backlog` | Per-session queued wake lines + unread mail, oldest first — who is sitting on what. |
 | `focus <instance>` | Raise a session's console window (handle captured at spawn). |
 | `recover [n\|all\|dismiss n]` | List sessions lost to a crash — persona, declared purpose, last evidence, hubs first — and relaunch them show-and-pick. Dismissals archive, never delete. |
@@ -284,6 +296,23 @@ Run `help` in huddle for the live version. Current commands:
 | `quit` | Exit huddle. Running sessions keep running. |
 | `shutdown` | Stop every session, then exit. |
 | `help` | Show the command reference. |
+
+### Command-line modes
+
+The table above is the interactive console. `huddle.exe` also has argument modes that run
+and exit without an orchestrator, watchers, or the singleton — the ledger ones exist
+precisely so they keep working when huddle is not:
+
+| Invocation | What it does |
+|------------|--------------|
+| `huddle --claim <path> [more...]` | Record a claim on repo-relative paths and report any other holder. See [Claiming files](#claiming-files). |
+| `huddle --release <path> [more...]` | Release files from your own claims. |
+| `huddle --ledger [repo]` | Print the ledger: what is claimed, by whom, since when. |
+| `huddle --projects-html <out.html> [--config <path>]` | Render the projects status page headlessly and exit. |
+| `huddle --config <path>` | Start normally against a specific config file. |
+
+`--inject` and `--cred-log` also exist but are internal — huddle spawns itself with them
+(console keystroke injection and git credential-request logging).
 
 ---
 
@@ -574,7 +603,7 @@ huddle/
     _huddle/inbox/         — orchestrator command inbox
     <instance>/inbox/      — per-session mailboxes
     workledger/            — freeform session ledger files
-    workledger/claims/     — structured orchestrator-owned claims
+    workledger/claims/     — structured claims (agent- and orchestrator-written)
   publish/                 — single-file exe (build.cmd output)
   src/                     — C# source (see DESIGN.md for per-file)
   scripts/statusline.ps1   — Claude Code statusline for Windows

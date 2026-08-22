@@ -13,6 +13,47 @@ is the source of truth, the handle is just for reading.
 day: start a new day block at the top of the file. Never rewrite a shipped entry.
 History from before this file lives in the git commit log.
 
+## 2026-08-16
+
+### 2026-08-16.1 — Ledger claims: reservations without an arbitrator — `063852d`..`23770d2`
+
+- **Why:** on 2026-08-16 huddle was down and two `myapp` agents worked the same
+  files and conflicted (ISSUES.md I011). They had not skipped the claim protocol — they
+  could not reach it: the protocol mailed a `claim` command to the orchestrator and
+  waited for `ack:claim`, so with nothing reading `_huddle/inbox/` no claim was ever
+  recorded and the two sessions were invisible to each other by construction. Huddle is
+  now out of the claim write path.
+- `063852d` `LedgerCli` — record-and-report: `Claim` ALWAYS writes and returns the other
+  holders instead of refusing (refusing needs an arbiter alive; reporting does not);
+  `Release` touches only the caller's own claims; `Describe` renders the ledger one line
+  per claimed file — what is claimed, by whom, since when. `40590a8` makes the record +
+  overlap scan one cross-process critical section, so two simultaneous claimants each see
+  the other rather than both seeing an empty ledger. That named mutex guards
+  `RecordWithOverlaps` — the path `huddle --claim` and the mail `claim` command both take —
+  and **only** that path: `dispatch-batch`'s `AdvanceQueue` still pre-flights through
+  `TryClaim`, which takes the in-process lock alone (deliberately frozen; the batch path
+  depends on its refuse-on-conflict behaviour).
+- `83db472` `huddle --claim <path>…` / `--release <path>…` / `--ledger [repo]` —
+  argument modes that run the binary and never contact a running huddle, which is what
+  makes a claim survive the orchestrator being down. `ac61f6d` guards release against an
+  absent claims dir.
+- `d469fa3` spawned sessions export `HUDDLE_CLAIMS` / `HUDDLE_INSTANCE` / `HUDDLE_REPO` /
+  `HUDDLE_GUID`, so an agent types only paths; `fcf249c` keeps that export off the
+  mail-hook failure path — a hook-file write failure must not silently strip a session's
+  ledger identity.
+- `2d6f45e` the mail `claim` command records and reports too, so the ledger means the
+  same thing by either route: it always replies `ack:claim`, naming any other holder.
+  **`nack:claim` no longer means contention** — it now means a malformed request only
+  (bad body, unknown repo, empty file list). `23770d2` restores inline orphan reaping on
+  that path.
+- `personas/_shared.md` Work Coordination rewritten to the ledger protocol — read the
+  ledger, claim (it always succeeds, nothing to wait for), mail the holder if one is
+  named and take turns, release after committing, don't re-claim `dispatch-batch` work.
+  The 2026-07-16 duplication warning (I005) stands; the mechanism under it changed.
+  ISSUES.md I011 files the incident. — (commit below)
+- Spec `docs/superpowers/specs/2026-08-16-ledger-claims-design.md`, plan
+  `docs/superpowers/plans/2026-08-16-ledger-claims.md`.
+
 ## 2026-08-09
 
 ### 2026-08-09.8 — Official icon kit lands — (commit below)

@@ -56,10 +56,39 @@ public class Orchestrator : IDisposable
         _ipc = ipc;
         _tasks = new TaskTracker();
         _log = log;
-        _claims = new WorkLedgerClaims(ipc.ClaimsDir, log);
+        // GitWorktrees.Identify is what lets the ledger tell a SIBLING worktree of one repo
+        // from an unrelated repo that merely shares a relative filename (I014 vs I008). It is
+        // consulted only for the non-blocking merge-risk report; when git cannot answer, the
+        // report narrows and nothing else changes.
+        _claims = new WorkLedgerClaims(ipc.ClaimsDir, log, ResolveRepoRoot, GitWorktrees.Identify);
         _queue = new WorkQueue(ipc.QueueDir, log);
         _queue.Load();
         _resLedger = new ResourceLedger(ipc.ResLedgerDir, log);
+    }
+
+    /// <summary>
+    /// Repo name (or alias) → its absolute root, read from the SessionManager registry that
+    /// every other verb resolves against, so the ledger can never disagree with what `start`
+    /// or `shell` think a repo is. Returns null for a name the registry does not know, which
+    /// puts that comparison back on the pre-I013 name matching rather than guessing a root.
+    ///
+    /// I013: registered roots are nested (`myapp` inside `LIB-root` inside `workspace`),
+    /// so one physical file has several repo-relative spellings. Handing the resolver to
+    /// WorkLedgerClaims is what lets it compare files instead of names.
+    /// </summary>
+    /// <summary>
+    /// The repo-name → root resolver, exposed so operator-facing views (the `conflicts` verb)
+    /// can compare claims exactly as the arbiter does instead of building a second resolver
+    /// or re-reading huddle.json. One registry, one answer.
+    /// </summary>
+    public Func<string, string?> RepoRootResolver => ResolveRepoRoot;
+
+    private string? ResolveRepoRoot(string repo)
+    {
+        if (string.IsNullOrWhiteSpace(repo)) return null;
+        return _manager.Repos.TryGetValue(_manager.ResolveRepoName(repo), out var def)
+            ? def.Root
+            : null;
     }
 
     public ResourceLedger ResLedger => _resLedger;
@@ -847,7 +876,7 @@ public class Orchestrator : IDisposable
 
             // Step 1: self-overlap check
             var proposedClaims = proposed.Select(p => p.claim).ToList();
-            var selfOverlaps = WorkLedgerClaims.FindOverlaps(proposedClaims);
+            var selfOverlaps = WorkLedgerClaims.FindOverlaps(proposedClaims, ResolveRepoRoot);
             if (selfOverlaps.Count > 0)
             {
                 var detail = string.Join("; ", selfOverlaps.Select(o =>
@@ -887,14 +916,32 @@ public class Orchestrator : IDisposable
         }
     }
 
-    // Runtime claim: the arbiter for sessions whose work did NOT arrive via
-    // dispatch-batch (console-started, operator-typed, mail-triggered). Before
+    // Runtime claim: the ledger entry point for sessions whose work did NOT arrive
+    // via dispatch-batch (console-started, operator-typed, mail-triggered). Before
     // substantive edits a session claims its file scope — include the plan doc
-    // itself in the list to lock a whole plan. Granted claims live in the same
-    // claims dir the queue checks, so batches and runtime claimants can never
-    // dispatch over each other. Two agents executing one plan in parallel with
-    // no arbiter is the 2026-07-16 incident.
+    // itself in the list to lock a whole plan. The claim is recorded unconditionally
+    // and any other holder is named back to the claimant; the two sessions settle it
+    // between themselves. Recorded claims live in the same claims dir the queue
+    // checks, so dispatch-batch still refuses to dispatch a unit over a runtime
+    // claimant's files. Two agents executing one plan in parallel while unaware of
+    // each other is the 2026-07-16 incident.
     private static int _runtimeClaimSeq;
+
+    /// <summary>
+    /// The merge-risk sentence appended to a claim ack, or "" when there is none (I014).
+    /// Worded so it can never be read as a conflict: nobody is blocked, the files are not the
+    /// same file, and the cost lands at merge time. Before this, the ledger reported that
+    /// situation as silence and the two agents found out by talking to each other.
+    /// </summary>
+    private static string MergeRiskNote(IReadOnlyList<ClaimOverlap> warnings)
+    {
+        if (warnings.Count == 0) return "";
+        var parts = warnings.Select(w =>
+            $"{w.B.SessionId} holds {string.Join(", ", w.SharedFiles)} in " +
+            (string.IsNullOrEmpty(w.B.Branch) ? "another checkout" : $"branch {w.B.Branch}"));
+        return $" | MERGE RISK (not a conflict, you are not blocked): {string.Join("; ", parts)} — " +
+               "different files on disk, but you will conflict at merge; tell them what you are changing";
+    }
 
     private void HandleClaim(IpcMessage msg)
     {
@@ -944,27 +991,66 @@ public class Orchestrator : IDisposable
             // Projects phase 1: caller may stamp the claim with its project slug;
             // fall back to the owning session's stamp so dispatched workers inherit.
             var claimProject = StringProp(body, "project") ?? ownerInstance?.Project ?? "";
-            var claim = new WorkLedgerClaim(ownerId, resolvedRepo, claimId, DateTime.UtcNow, baseSha, files, ownerGuid, claimProject);
+            // I014: record the checkout the paths are relative to instead of leaving every
+            // reader to infer it from the repo NAME. The owning session's own Root is the
+            // truth, but only when it is claiming in its OWN repo — a session claiming
+            // somewhere else spelled its paths from THAT repo's root, so that is the base.
+            var claimRoot = ownerInstance != null &&
+                            ownerInstance.RepoName.Equals(resolvedRepo, StringComparison.OrdinalIgnoreCase)
+                ? ownerInstance.Root
+                : repoDef.Root;
+            // Informational only, never part of a collision decision; null on detached HEAD
+            // or any git failure, which is recorded as "unknown" rather than treated as an error.
+            var claimBranch = GitHelper.CurrentBranch(claimRoot) ?? "";
+            var claim = new WorkLedgerClaim(ownerId, resolvedRepo, claimId, DateTime.UtcNow, baseSha, files, ownerGuid, claimProject,
+                Root: claimRoot, Branch: claimBranch);
 
-            // Reap-on-nack: a conflict against a dead session's stale claim must not block a
-            // live claimant. Pass the current live roster so TryClaim can archive orphan holders
-            // inline (empty roster disables reaping — recovery guard).
-            if (_claims.TryClaim(claim, LiveRoster(), out var conflicts))
+            // Reap orphans FIRST, so the overlaps reported below are overlaps with sessions
+            // that actually exist. Recording never refuses any more, so a stale claim from an
+            // exited session no longer blocks anyone — but it would still be named back to the
+            // claimant as a holder to go negotiate with, and telling an agent to mail a session
+            // that died two days ago is its own failure. This is the orchestrator's advantage
+            // over `huddle --claim`: the CLI has no live roster and must report a stale holder
+            // with its claim age and let the agent judge; here we can just resolve it.
+            // ReapOrphanClaims (not the raw _claims.ReapOrphans) because it carries the
+            // empty-live-roster guard: during an incomplete recovery every claim looks
+            // orphaned, and reaping against an empty roster would archive every live claim.
+            ReapOrphanClaims();
+
+            // Record, never refuse. A nack needs an arbiter alive to send it, and on
+            // 2026-08-16 there wasn't one: the claim mail sat unread and two sessions
+            // edited the same files believing they were alone. The same claim through
+            // `huddle --claim` is always written, so the mail path must behave
+            // identically or the ledger means two different things depending on route.
+            // (dispatch-batch still uses TryClaim — that is a planner pre-flight check
+            // made before any work starts, not a runtime lock.)
+            var result = LedgerCli.Claim(_claims, claim);
+            // Merge risks are appended to whichever ack goes out, never substituted for a
+            // conflict report: they are non-blocking by construction (different files on
+            // disk) and must not dilute the "stop and talk" of a real overlap.
+            var mergeNote = MergeRiskNote(result.MergeWarnings);
+            if (result.Overlaps.Count == 0)
             {
-                _log($"Orchestrator: claim granted — {msg.From} holds {files.Count} file(s) in {resolvedRepo} ({claimId})");
-                SendAck(msg.From, msg.Subject, $"claimed {files.Count} file(s) in {resolvedRepo} — release when done");
+                _log($"Orchestrator: claim recorded — {msg.From} holds {files.Count} file(s) in {resolvedRepo} ({claimId}){(mergeNote.Length > 0 ? " [merge risk]" : "")}");
+                SendAck(msg.From, msg.Subject, $"claimed {files.Count} file(s) in {resolvedRepo} — release when done{mergeNote}");
+                return;
             }
-            else
-            {
-                // Name the repo on BOTH sides: a wildcard match against a legacy
-                // no-repo claim is otherwise indistinguishable from a same-repo
-                // conflict, and I008 taught us an unexplained holder wastes everyone's
-                // time. (Post-I008 a cross-repo pair can only be a legacy claim.)
-                var detail = string.Join("; ", conflicts.Select(o =>
-                    $"{o.B.SessionId} holds {string.Join(", ", o.SharedFiles)} in {(string.IsNullOrEmpty(o.B.Repo) ? "(unrecorded repo — legacy claim)" : o.B.Repo)}"));
-                _log($"Orchestrator: claim REJECTED — {msg.From} (repo {resolvedRepo}): {detail}");
-                SendNack(msg.From, msg.Subject, $"conflict: {detail} — do NOT edit those files; mail the holder to coordinate, or re-claim after they release");
-            }
+
+            // Name the repo on BOTH sides: a wildcard match against a legacy
+            // no-repo claim is otherwise indistinguishable from a same-repo
+            // conflict, and I008 taught us an unexplained holder wastes everyone's
+            // time. (Post-I008 a cross-repo pair can only be a legacy claim.)
+            // The holder's claim time is included for the cases reaping cannot decide: a
+            // holder that is genuinely live but has sat on a scope for days is a different
+            // negotiation from one that claimed it a minute ago, and only the claimant can
+            // judge that. (A dead holder was already archived above.)
+            var detail = string.Join("; ", result.Overlaps.Select(o =>
+                $"{o.B.SessionId} also holds {string.Join(", ", o.SharedFiles)} in " +
+                $"{(string.IsNullOrEmpty(o.B.Repo) ? "(unrecorded repo — legacy claim)" : o.B.Repo)} " +
+                $"since {o.B.ClaimedAt.ToUniversalTime():yyyy-MM-dd HH:mm}Z"));
+            _log($"Orchestrator: claim recorded WITH OVERLAP — {msg.From} (repo {resolvedRepo}): {detail}");
+            SendAck(msg.From, msg.Subject,
+                $"claimed {files.Count} file(s) in {resolvedRepo}; {detail} — mail them and agree who goes first before editing those files{mergeNote}");
         }
         catch (Exception ex)
         {
@@ -1051,7 +1137,7 @@ public class Orchestrator : IDisposable
 
         try
         {
-            AuditAndReleaseClaims(instance);
+            AuditAndReleaseClaims(instance, newStatus);
         }
         catch (Exception ex)
         {
@@ -1124,7 +1210,7 @@ public class Orchestrator : IDisposable
         }
     }
 
-    private void AuditAndReleaseClaims(SessionInstance instance)
+    private void AuditAndReleaseClaims(SessionInstance instance, SessionStatus endStatus)
     {
         var sessionId = instance.InstanceId;
         var removed = _claims.DeleteAllForSession(sessionId);
@@ -1166,10 +1252,23 @@ public class Orchestrator : IDisposable
 
             _log($"Orchestrator: released {claim.Files.Count} file claim(s) for {sessionId} (batch {claim.BatchId})");
 
-            // The claim's BatchId carries the work-unit id. Mark the unit Done so
-            // dependents unblock and overlapping queued units can now dispatch.
-            // No-op for claims not tracked by the queue (start/direct sessions).
-            _queue.MarkDone(claim.BatchId);
+            // The claim's BatchId carries the work-unit id. A session going away is
+            // NOT evidence its unit finished: a crash, or a clean stop with nothing
+            // committed to the declared files, used to mark the unit Done — which
+            // unblocked dependents and spawned the next session on a foundation that
+            // never landed (2026-08-22: three huddle sessions killed, a fourth
+            // auto-spawned). Done needs a clean stop AND a commit touching the
+            // declared scope; anything else is Failed, dependents stay queued, and the
+            // operator re-dispatches. No-op for claims not tracked by the queue.
+            var committedDeclared = committed.Where(f => declared.Contains(f)).ToList();
+            var finished = endStatus == SessionStatus.Stopped && committedDeclared.Count > 0;
+            if (finished)
+                _queue.MarkDone(claim.BatchId);
+            else if (_queue.StateOf(claim.BatchId) == QueueState.Active)
+            {
+                _queue.MarkFailed(claim.BatchId);
+                _log($"Orchestrator: unit {claim.BatchId} -> Failed — {sessionId} {endStatus.ToString().ToLowerInvariant()} with no commits to its declared files; dependents stay queued. Re-dispatch to retry.");
+            }
         }
 
         // A finished unit may have freed files or satisfied a dependency — dispatch
@@ -1190,14 +1289,25 @@ public class Orchestrator : IDisposable
             var sessionId = $"{u.Repo}:{u.Persona}";
 
             // The queue only knows about its own units; a runtime claim (claim
-            // command) is invisible to Dispatchable(). Acquire through the same
-            // arbiter so a batch can never dispatch over a runtime claimant —
-            // on conflict the unit simply stays queued and retries on the next
-            // advance (a release/stop always triggers one). Reap-on-nack: a block
-            // by a DEAD session's stale claim is cleared inline rather than parking
-            // the unit until the next startup/`conflicts` sweep. The roster is rebuilt
-            // per iteration so a unit dispatched earlier in THIS advance is live and
-            // its own fresh claim is never reaped.
+            // command, or `huddle --claim`) is invisible to Dispatchable(). So check
+            // the LEDGER before dispatching: a unit whose files are already claimed
+            // stays queued and retries on the next advance (a release/stop always
+            // triggers one). Reap-on-nack: a block by a DEAD session's stale claim is
+            // cleared inline rather than parking the unit until the next
+            // startup/`conflicts` sweep. The roster is rebuilt per iteration so a unit
+            // dispatched earlier in THIS advance is live and its own fresh claim is
+            // never reaped.
+            //
+            // Scope of the guarantee, precisely: TryClaim's check-and-write is atomic
+            // against other callers IN THIS PROCESS (the in-process `_lock`) — which
+            // covers the mail `claim` path and auto-release, both of which run here.
+            // It does NOT take the machine-scoped named mutex that RecordWithOverlaps
+            // uses, so a `huddle --claim` running in a SEPARATE process could interleave
+            // between this read and this write. The window is microseconds and the risk
+            // is pre-existing; deliberately not closed, because dispatch-batch depends on
+            // TryClaim's exact refuse-on-conflict behaviour and widening it is a bigger
+            // change than the exposure warrants. Do not describe this as a general
+            // cross-process critical section — it is not one.
             if (!_claims.TryClaim(new WorkLedgerClaim(sessionId, u.Repo, u.Id, DateTime.UtcNow, baseSha, u.Files), LiveRoster(), out var extConflicts))
             {
                 var detail = string.Join("; ", extConflicts.Select(o =>

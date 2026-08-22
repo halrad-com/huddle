@@ -14,7 +14,7 @@ public sealed record Worktree(string Root, string? Branch, bool IsMain);
 ///
 /// The registered root can be a SUBDIR of the git repo (e.g. <c>LIB/myapp</c> inside
 /// the LIB git repo); that subpath is preserved across worktrees, so
-/// <c>LIB/myapp</c> expands to <c>LIB-rockalley/myapp</c>. The main worktree is
+/// <c>LIB/myapp</c> expands to <c>LIB-FEATURE/myapp</c>. The main worktree is
 /// always first in the returned list, which is what lets callers dedupe main-canonical.
 ///
 /// git is shelled read-only (via <see cref="GitHelper"/>); any failure degrades to a
@@ -109,6 +109,30 @@ public static class GitWorktrees
             list.Add(new Worktree(NormFull(dir), wt.Branch, wt.IsMain));
         }
         return list;
+    }
+
+    /// <summary>
+    /// Identify one checkout for the ledger's merge-risk test (ISSUES.md I014): the object
+    /// store it shares with its siblings, plus its own worktree top. Null when the directory
+    /// is not a git checkout, or git cannot be asked — which narrows the warning rather than
+    /// failing anything. Never throws.
+    ///
+    /// This is the signal that separates a sibling worktree from an unrelated repo that
+    /// merely happens to contain a file of the same name: two repos never share an object
+    /// store, so `myapp/README.md` can never warn about `corelib/README.md` (I008).
+    /// </summary>
+    public static CheckoutInfo? Identify(string root)
+    {
+        try
+        {
+            var (store, top) = GitHelper.CheckoutIdentity(root);
+            if (string.IsNullOrEmpty(store) || string.IsNullOrEmpty(top)) return null;
+            return new CheckoutInfo(store, top);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static string NormFull(string p)

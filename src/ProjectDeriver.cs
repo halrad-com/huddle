@@ -62,7 +62,7 @@ public static class ProjectDeriver
             return null;
         }
 
-        // @branch selects that branch's worktree (e.g. rockalley -> the ROCKALLEY checkout).
+        // @branch selects that branch's worktree (e.g. FEATURE -> the FEATURE checkout).
         var baseDir = root;
         var resolvedBranch = branch;
         if (branch != null)

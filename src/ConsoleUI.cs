@@ -2610,6 +2610,25 @@ public class ConsoleUI
     private static string Truncate(string s, int max)
         => string.IsNullOrEmpty(s) ? "(no subject)" : (s.Length <= max ? s : s[..(max - 1)] + "…");
 
+    /// <summary>
+    /// How one claim spelled a file: `repo: path`, or just the path for a legacy claim that
+    /// recorded no repo. The repo is half of the spelling — a path alone cannot show the
+    /// operator why two claims on differently-named repos are the same file.
+    /// </summary>
+    private static string Spelling(string repo, string file)
+        => string.IsNullOrWhiteSpace(repo) ? file : $"{repo}: {file}";
+
+    /// <summary>
+    /// Which checkout a claim is in, for the merge-risk report (I014): its recorded root plus
+    /// the branch when it recorded one. Branch is display only — no decision reads it — but
+    /// without it "two checkouts" is a fact the operator cannot act on.
+    /// </summary>
+    private static string Where(WorkLedgerClaim c)
+    {
+        var root = string.IsNullOrWhiteSpace(c.Root) ? c.Repo : c.Root;
+        return string.IsNullOrWhiteSpace(c.Branch) ? root : $"{root} ({c.Branch})";
+    }
+
     private void HandleConflicts()
     {
         if (Ipc == null)
@@ -2650,11 +2669,18 @@ public class ConsoleUI
         }
 
         // Source B: orchestrator-owned claims (new in Phase 1)
-        var claimsFromOrch = new Dictionary<string, List<(string session, string batch)>>();
+        var orchClaims = new List<WorkLedgerClaim>();
+        // I013: the operator's view must decide collisions the way the ARBITER does, on
+        // resolved absolute paths — nested repo roots give one physical file several
+        // repo-relative spellings, and grouping on raw strings made this verb report an
+        // all-clear on pairs the arbiter would refuse. The resolver is the orchestrator's
+        // own (never a second one built here); with no orchestrator it stays null and the
+        // comparison degrades to the pre-I013 name matching rather than failing.
+        var resolveRoot = Orchestrator?.RepoRootResolver;
         var claimsDir = Ipc.ClaimsDir;
         if (Directory.Exists(claimsDir))
         {
-            var reader = new WorkLedgerClaims(claimsDir, Log);
+            var reader = new WorkLedgerClaims(claimsDir, Log, resolveRoot);
 
             // On-demand orphan sweep: archive claims whose owning instance is no longer
             // live before reporting, so a stranded claim can't show up as a phantom holder.
@@ -2666,20 +2692,37 @@ public class ConsoleUI
             foreach (var c in reaped)
                 Log($"Reaped orphan claim {c.SessionId} ({c.BatchId}) — archived, was holding {string.Join(", ", c.Files)}");
 
-            foreach (var claim in reader.ReadAll())
-            {
-                var sessionSafe = claim.SessionId.Replace(':', '_');
-                foreach (var file in claim.Files)
-                {
-                    if (!claimsFromOrch.ContainsKey(file))
-                        claimsFromOrch[file] = new List<(string, string)>();
-                    claimsFromOrch[file].Add((sessionSafe, claim.BatchId));
-                }
-            }
+            orchClaims.AddRange(reader.ReadAll());
         }
 
         var conflicts = claimsFromLedger.Where(c => c.Value.Count > 1).ToList();
-        var orchOverlaps = claimsFromOrch.Where(c => c.Value.Count > 1).ToList();
+        // One definition of "these two claims collide" — ClaimConflictView delegates the
+        // decision to WorkLedgerClaims.FindOverlaps and only explains the answer.
+        List<ClaimCollision> orchOverlaps;
+        try
+        {
+            orchOverlaps = ClaimConflictView.Find(orchClaims, resolveRoot);
+        }
+        catch (Exception ex)
+        {
+            // The verb never throws at the operator: a broken registry costs the explanation,
+            // not the report.
+            Log($"conflicts: claim comparison failed ({ex.GetType().Name}: {ex.Message}); listing claims only");
+            orchOverlaps = new List<ClaimCollision>();
+        }
+        // I014's third outcome: not colliding, but the same path in a sibling worktree — a
+        // merge conflict already booked in. Computed separately and failing separately, so a
+        // git hiccup costs the warning and nothing else.
+        List<ClaimMergeRisk> mergeRisks;
+        try
+        {
+            mergeRisks = ClaimConflictView.FindMergeRisks(orchClaims, resolveRoot, GitWorktrees.Identify);
+        }
+        catch (Exception ex)
+        {
+            Log($"conflicts: merge-risk comparison failed ({ex.GetType().Name}: {ex.Message}); skipping that section");
+            mergeRisks = new List<ClaimMergeRisk>();
+        }
         var hasOutput = false;
 
         if (conflicts.Count > 0)
@@ -2708,29 +2751,67 @@ public class ConsoleUI
                 try
                 {
                     Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"  ✖ OVERLAP in orchestrator claims on: {ov.Key}");
+                    Console.WriteLine($"  ✖ OVERLAP in orchestrator claims: {ov.A.SessionId} and {ov.B.SessionId}");
                     Console.ForegroundColor = ConsoleColor.DarkGray;
-                    foreach (var (session, batch) in ov.Value)
-                        Console.WriteLine($"      - {session.Replace('_', ':')}  (batch {batch})");
+                    foreach (var f in ov.Files)
+                    {
+                        // Name the physical file first, then how each holder spelled it —
+                        // without that, two differently-spelled paths reported as one
+                        // conflict read as a bug in huddle rather than as the point (I013).
+                        Console.WriteLine($"      {f.ResolvedPath ?? f.SpellingB}");
+                        Console.WriteLine($"        {ov.A.SessionId} (batch {ov.A.BatchId}) claims it as {Spelling(ov.A.Repo, f.SpellingA)}");
+                        Console.WriteLine($"        {ov.B.SessionId} (batch {ov.B.BatchId}) claims it as {Spelling(ov.B.Repo, f.SpellingB)}");
+                        if (f.CrossSpelling && f.ResolvedPath != null)
+                            Console.WriteLine("        ↑ two spellings of one path — same file on disk");
+                        else if (f.CrossSpelling)
+                            Console.WriteLine("        ↑ two spellings, compared by repo name (root not resolved)");
+                    }
                 }
                 finally { Console.ResetColor(); }
             }
             hasOutput = true;
         }
 
-        // Also list active claims even when not overlapping — useful operator view
-        if (claimsFromOrch.Count > 0)
+        if (mergeRisks.Count > 0)
         {
+            Console.WriteLine();
+            foreach (var risk in mergeRisks)
+            {
+                try
+                {
+                    // Yellow, not red, and the word "conflict" only ever attached to "merge":
+                    // nobody is blocked here, and an operator who reads this as an overlap
+                    // would stop work that does not need stopping.
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"  ⚠ MERGE RISK (not an overlap): {risk.A.SessionId} and {risk.B.SessionId}");
+                    Console.ForegroundColor = ConsoleColor.DarkGray;
+                    foreach (var f in risk.Files)
+                        Console.WriteLine($"      {f}");
+                    Console.WriteLine($"      {Where(risk.A)} vs {Where(risk.B)} — different files on disk, " +
+                                      "same path on two branches");
+                }
+                finally { Console.ResetColor(); }
+            }
+            hasOutput = true;
+        }
+
+        // Also list active claims even when not overlapping — useful operator view.
+        // Qualified by repo so two repos' same-named files are not shown as one line.
+        if (orchClaims.Count > 0)
+        {
+            var lines = orchClaims
+                .SelectMany(c => c.Files.Select(f => (Label: Spelling(c.Repo, f), Holder: $"{c.SessionId} (batch {c.BatchId})")))
+                .OrderBy(x => x.Label, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(x => x.Holder, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
             Console.WriteLine();
             try
             {
                 Console.ForegroundColor = ConsoleColor.DarkGray;
                 Console.WriteLine("  Active orchestrator claims:");
-                foreach (var kv in claimsFromOrch.OrderBy(k => k.Key))
-                {
-                    var holder = kv.Value[0];
-                    Console.WriteLine($"    {kv.Key}  ←  {holder.session.Replace('_', ':')} (batch {holder.batch})");
-                }
+                foreach (var (label, holder) in lines)
+                    Console.WriteLine($"    {label}  ←  {holder}");
             }
             finally { Console.ResetColor(); }
             hasOutput = true;
