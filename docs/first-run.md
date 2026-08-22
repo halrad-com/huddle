@@ -138,7 +138,7 @@ of its config file. So the way to span machines is to put the working set — in
 and point each machine's huddle at the same config.
 
 Concrete example (the setup this repo runs on): the repo lives at the UNC path
-`\\atom\users\source\repos\seatbelt` and **every** machine maps that share to `S:`. So on
+`\\nas\users\source\repos\seatbelt` and **every** machine maps that share to `S:`. So on
 each box:
 
 ```
@@ -155,7 +155,7 @@ same file-based IPC, just located where every machine can reach it.
 
 Practical notes for the shared-share setup:
 
-- **Map the same drive letter on every machine** (here, `S:` → `\\atom\users`). That's what
+- **Map the same drive letter on every machine** (here, `S:` → `\\nas\users`). That's what
   makes the `root` paths in `huddle.json` valid on all boxes without per-machine configs.
 - The share must support normal file create/rename/delete with reasonable consistency
   (SMB on a LAN is fine). The orchestrator already tolerates missed events via its rescan
@@ -169,10 +169,8 @@ Practical notes for the shared-share setup:
   multi-machine over a single shared `ipc/` does not require it.
 
 A related but separate concern — keeping `~/.claude/` (CLAUDE.md, memory, skills, settings)
-consistent across machines so agents share calibration — is captured in
-[`docs/claude-config-sync-spec.md`](claude-config-sync-spec.md) (idea stage), with a
-real migration log at
-[`docs/2026-04-26-workstation-b-claude-config-migration.md`](2026-04-26-workstation-b-claude-config-migration.md).
+consistent across machines so agents share calibration — is out of scope for huddle
+itself; treat it as a per-machine setup step.
 
 ## Notes for verifying a clean enlistment
 
