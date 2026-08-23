@@ -13,6 +13,216 @@ is the source of truth, the handle is just for reading.
 day: start a new day block at the top of the file. Never rewrite a shipped entry.
 History from before this file lives in the git commit log.
 
+## 2026-08-23
+
+### 2026-08-23.2 — Feature ledger phase 2: obligations become durable and automatic — `6d3eb25`, `80df445`, `94fa94e`, `a945630`, `3ccb447`, `7021576`, `2fd3fcd`, `4960e8d`, `2ddfb05`, `a0715dc`
+
+Phase 1 made the ledger readable. This makes a dropped delegation impossible to hide.
+Schema and rules in [`docs/ledger/README.md`](docs/ledger/README.md); design in
+DESIGN.md, *The feature ledger*.
+
+**Any `type:"task"` mail, from any agent to any agent, now opens a tracked row** in the
+recipient's repo ledger without anyone running a command — keyed on the mail file, so a
+rescan, a retry or a restart re-finds it rather than opening a second. Moving that mail
+to `processed/` appends `task-acked`: acknowledgement already had a filesystem meaning,
+so this reuses it instead of inventing one. That is the timestamp task tracking never
+had — the audit could only approximate age-at-read from archive mtimes, with a median
+polluted to zero. All four of the audit's dropped assignments were `type:"task"`, and
+every one would have shown up in `ledger open --by-age` the day it was sent.
+
+**`TaskTracker` is now a façade over the ledger.** The dictionary and the in-memory
+counter are gone, so ids survive restarts — `T001` was previously issued 23 times to 23
+different pieces of work — and a status update for work that really happened no longer
+nacks "unknown task". Ids are repo-qualified, because numbering is per repo. `Create`
+returns null when the assignee's repo has no writable ledger, and both call sites refuse
+rather than hand back an obligation nothing is recording.
+
+**Delivered and accepted are different words now.** A work-queue unit reaching Done
+appends `task-delivered` and never `task-accepted`; a test pins that no sequence of queue
+events can produce an acceptance by any route. Acceptance is `ledger accept <id>`, which
+refuses unless the item is delivered and refuses a Deliverable whose `accepts` gate is
+unnamed. That conflation is why all 13 persisted units read Done, including the AutoCal
+unit the operator later found broken.
+
+New verbs: `ledger accept <id>`, `ledger drop <id> <why>` (reason required — dropping is
+how work stops existing), `ledger decline <id> [note]` (cheap and recorded; started work
+is `abandoned` instead). Because huddle never rewrites `ledger.md`, hierarchy state
+changes are `state` events applied as an **overlay** at read time: the State column is
+the baseline, events win, latest by timestamp rather than by write order.
+
+**Unacknowledged tasks escalate once**, past `taskAckMinutes`, to the dispatcher by mail
+and to the operator's console — hung off the existing rescan tick rather than a second
+timer. "Already escalated" is rebuilt from the log, so a restart does not re-announce
+every old assignment at once; the surface must not become a nag.
+
+Underneath: `LedgerWriter` is the single append path, with id allocation, 5 MB rotation
+and a machine-scoped mutex so two huddles cannot interleave half a line. Ids are compared
+**parsed, never as text** — `T-7`, `T-007` and `repo:T-007` are one task. A forward jump
+in the task state machine is now legal (an agent that does the work and reports complete
+never sent an ack), except into `accepted`, which must still come from `delivered`.
+
+Also fixed, and first because everything else depended on it: **mail to an idle session
+was a dead letter.** The wake line goes to `pending.txt`, which is drained by hooks that
+fire on a turn boundary — and an idle session ends no turn. Two fix tasks sat 27 minutes
+with both recipients idle until the operator injected by hand. Huddle now nudges the
+console after delivery, and re-drives held wakes from the retry tick; the foreground gate
+is preserved, so an operator typing is never stomped.
+
+### 2026-08-23.1 — `stats`: what moved where, who touched it, and when — `9596588`, `8bd3dca`, `f07c409`, `3a4abd1`, `9d7c58d`, `47c6346`, `5251c5d`, `38db86f`, `8b951a6`
+
+A new `stats [<repo>] [--who] [--since 30d|12h] [html]` verb, answering the operator's
+question *"what repos are being used, when, by who"* from corpora huddle already held —
+so it reports on the past week rather than only from the moment it shipped. Full
+reference in [`docs/repo-stats.md`](docs/repo-stats.md).
+
+Per repo: remotes named by identity, pushes/fetches with the last push, local and
+unpushed commits with line counts, dirty files, attribution, session time, work volume
+(units, mail, handoffs, open claims), and a health note for a long-running session with
+nothing attributable to it. A registered root that is not a git checkout is a note, not
+an error.
+
+**Attribution is graded and always labelled.** Every agent commits as the same git
+identity, so a reflog line can never say who. `exact` means a signal named the instance
+(a credential request, a claim, a dispatched unit, or a movement with exactly one live
+session in that root). `inferred` means roster overlap, and renders as a *list* —
+two candidates stay two, never collapsed into one name.
+
+**Remotes are named by identity, not by local name** (`RemoteIdentity`). Every repo has
+an `origin`, and `myapp` carries a second remote pointing at a repo a push must
+never reach, so `origin/master` identified nothing. The console movement line now reads
+`[git] myapp pushed to dev.azure.com/contoso/LIB (master 97a3aa8)`. Userinfo is
+stripped — the `contoso@` in the Azure URL reaches no console line, log, or page.
+
+**`logs/git-activity.jsonl`** (new, append-only, `gitActivityLog` setting) retains what
+used to be discarded: the credential drop — huddle's one exact who-signal — was deleted
+the moment it was logged, and movements were console-only, so nothing survived a
+restart. `gitPollSeconds` now drives the poll interval that was hardcoded at 5s.
+
+**`stats html`** writes a self-contained `logs/stats.html` with a per-repo commit
+heatmap computed from the local clone: Azure DevOps has no equivalent of GitHub's
+contribution graph, some roots are not hosted at all, and this counts commits that were
+never pushed. Inline SVG, no script, no CDN, light and dark both defined.
+
+## 2026-08-22
+
+### 2026-08-22.3 — Settings fix pass: the block now drives behaviour, and `reload` cannot kill the fleet — `610b71b`, `9a46fdf`, `25d7035`
+
+Six findings from a `high` adversarial review of `2026-08-22.1`. Read that entry with
+this one: as shipped, settings validated and displayed correctly but **did not change what
+huddle did**.
+
+- **S1 — nothing at runtime read `config.Settings`.** Program.cs, Orchestrator and
+  auto-restart all read the legacy POCO properties, so `--set` changed the file and the
+  `settings` display and nothing else: the precedence `.1` documents was inverted in
+  practice, and the startup "using settings (x)" warning was false. Every reader of the
+  nine pre-existing keys now goes through `config.Settings`; the POCO properties remain
+  as the resolver's fallback input and are documented as read in exactly one place.
+  Per-session overrides still win. `ResolvedSettings.IntList` reads the validated
+  comma-separated text tier. *The implementation plan had no task to repoint the readers —
+  a plan gap, not a stray edit.*
+- **S2 — `reload` could kill huddle with children attached.** The pre-validation added in
+  `.1` caught only `SettingsException`; a trailing comma raises `JsonException`, which
+  escaped a bare `HandleCommand` call and took the process down — worse than before the
+  guard existed. `reload` now refuses on any load failure and names it, and `610b71b` adds
+  `CommandGuard` so no verb, present or future, can unwind `Main`.
+- **S3 — `huddle --config <path> --set k v` was never dispatched** (the verb had to be
+  `args[0]`), despite being the documented form; it fell through and silently booted a
+  second orchestrator. Dispatch is position-independent now, and a `--config` value that
+  spells a verb cannot hijack it.
+- **S4 — two parses, two option sets.** A strict deserialize plus a lenient document parse
+  plus a lenient writer meant `--set` could rewrite a commented file the loader then
+  refused. One option set, lenient everywhere; genuinely malformed JSON is still refused
+  by both reader and writer.
+- **S5 — `settings backoffSeconds 2, 5, 15` silently wrote `"2,"`.** The verb split on
+  space with max 3 and dropped the tail. It takes the whole remainder as the value now and
+  stores the list canonically; bare `settings unset` reports usage instead of refusing a
+  setting named "unset".
+- **S6 — three copies of the `--config` scan**, one of them missing the `myapp.json`
+  fallback, so the CLI and the console could disagree about which config exists. One
+  `ConfigPathResolver`, shared by `Main`, `--projects-html` and the settings CLI.
+- Console-verb and `reload` coverage moved out of a scratch harness into the real suite
+  (`SettingsVerbTests`). 518/518.
+- **Known, unchanged:** `crashLogRetention` has no consumer anywhere and did not before
+  this work either — it is settable and inert, left alone rather than given an invented
+  meaning. The five newer keys (`statsSinceDays`, `gitActivityLog`, `gitPollSeconds`,
+  `taskAckMinutes`, `transcriptMaxScan`) have no consumer **by design**; the stats and
+  ledger-phase-2 units own them.
+
+### 2026-08-22.2 — Feature ledger phase 1: the ledger exists and can be read — `d17ddf8`..`41be7b2`
+
+- **Why:** huddle tracked files, not obligations. The claims ledger answers *who is editing
+  what right now*; nothing answered *what has this agent accepted and not delivered*, and
+  nothing at all answered the operator's question — "did all the ideated things actually get
+  done or not." The audit behind this (`docs/2026-08-21-task-tracking-gap-audit.md`) found
+  `TaskTracker` in-memory only and reissuing `T001` 23 times, 14 completion reports nacked
+  `unknown task`, peer `"type":"task"` mail creating no tracking at all, and one session
+  holding four outstanding obligations — one unread for four days — while reporting
+  "nothing in flight, inbox clear."
+- **Read-only.** This phase parses, replays and renders; huddle writes nothing. Durable
+  obligations, mail ingestion, `ledger accept`/`drop` and the `TaskTracker` repoint are
+  phase 2; escalation and `status` annotation are phase 3.
+- `d17ddf8` `LedgerId` — `<TYPE>-<n>` over `E S U F D T`, per type per repo, never reused;
+  any digit width parses, three-digit zero-padded renders; `repo:ID` qualification with
+  case-insensitive repo comparison so `Huddle:F-1` and `huddle:F-001` are one id.
+- `59c04b8` the `ledger.md` parser: frontmatter plus the first pipe table, header matched
+  case-insensitively by name, extra trailing columns tolerated. An unparseable row is
+  **reported with its line number, never dropped** — silent loss is the failure this whole
+  design exists to prevent — and `ledger` renders those errors first. Task rows are refused
+  here: they live in `events.jsonl`.
+- `7cca312` both state machines, forward-only, plus the `accepts` gate. `dropped`,
+  `declined` and `abandoned` are terminal states, not removals. A Deliverable may not enter
+  `accepted` while `accepts` is empty; huddle does not run the gate, it refuses to record
+  acceptance without one being named.
+- `ef22f3e` the `events*.jsonl` reader — rotation-aware (live file read last), blank lines
+  skipped, a malformed line recorded as a problem rather than a crash. A task's current row
+  is materialized by replaying its events in timestamp order, so out-of-order lines are
+  fine; an illegal transition is reported and ignored, never applied.
+- `b521993` the renderers: per-repo snapshot, `open --by-age` across every configured repo
+  oldest first, the parent-nested tree, orphan tasks, and one item with ancestry, children
+  and event history.
+- `17601ce` `docs/ledger/README.md` (the schema scaffold, ships) and this installation's
+  seeded `docs/ledger/ledger.md` (private). The playbook's "Explicitly NOT shipped" list now
+  covers `docs/ledger/ledger.md` and `docs/ledger/events*.jsonl` — ledger rows name private
+  repos, workstreams and operator priorities — while `docs/ledger/README.md` is added to the
+  shipped-paths list **by name**, not by directory, so data can never be swept in.
+- `41be7b2` the `ledger` verb: `ledger`, `ledger all`, `ledger <id>`, `ledger open
+  [--by-age]`, `ledger orphans`, with `--repo` and `--owner` scoping.
+- **Caveat, by design:** the age column fills for tasks, which come from `events.jsonl` —
+  and nothing writes that file until phase 2. Hierarchy rows carry no timestamp in phase 1,
+  so they sort after dated items and show `-`. `ledger open --by-age` is the acceptance test
+  for the design; it is wired and rendering, but it cannot show real ages until phase 2
+  produces events.
+
+### 2026-08-22.1 — Settings: a validated allowlist, a `settings` verb, and a `--set` command line — `dc80d94`..`f83eb4c`
+
+- **Why:** huddle already had nine settings, and nothing validated them. `HuddleConfig.Load`
+  called `JsonSerializer.Deserialize` with no options, which silently ignores unknown
+  properties — so `rescanIntervalSecond` (one missing `s`) started huddle, reported nothing,
+  and ran the built-in default forever. A typo'd key was indistinguishable from a setting
+  that does nothing. There was no range check either (`rescanIntervalSeconds: -5` was
+  accepted), and no surface anywhere answered "what settings are actually in force."
+- `dc80d94` the allowlist: one `SettingDef` record per settable knob as the single source of
+  what is settable, with kind, range, and an `Applies` column (`live` vs `startup`) huddle
+  needs and otherapp did not, because an operator who changes a startup knob and sees no
+  effect concludes the settings system is broken. Load-time validation reports **every**
+  problem, not just the first, and offers a did-you-mean on a near miss.
+- `a138ec4` precedence — `"settings"` block > legacy top-level key > built-in default. The
+  nine existing top-level keys keep working and are labelled `top-level (legacy)`; a key set
+  in both resolves to `settings` and is reported once at startup. `HuddleConfig.Load` now
+  throws `SettingsException` listing every error rather than starting on settings the
+  operator does not have.
+- `5445940` write-back that rewrites from a validated map, so `--set` can never produce a
+  file the loader would reject; every other top-level property is carried through untouched,
+  and a file that does not load is refused rather than overwritten.
+- `84f8be0` `huddle --settings` / `--set <key> <value>` / `--unset <key>`, dispatched in the
+  same position as `--claim` (before config load, before the console starts) so a knob can be
+  changed from a script or a second window without launching the orchestrator. Exit 0
+  written, 1 refused, every refusal naming the key and the reason.
+- `f83eb4c` the `settings` console verb, and `reload` now validates `huddle.json` **before**
+  the running process agrees to exit — killing a live orchestrator with sessions attached
+  over a typo would be worse than the typo.
+- Design: `docs/superpowers/specs/2026-08-21-settings-design.md`. Reference: `docs/settings.md`.
+
 ## 2026-08-16
 
 ### 2026-08-16.1 — Ledger claims: reservations without an arbitrator — `063852d`..`23770d2`

@@ -10,6 +10,7 @@ public class Orchestrator : IDisposable
     private readonly SessionManager _manager;
     private readonly IpcManager _ipc;
     private readonly TaskTracker _tasks;
+    private readonly LedgerWriters _writers;
     private readonly Action<string> _log;
     private FileSystemWatcher? _watcher;
     private readonly WorkLedgerClaims _claims;
@@ -50,12 +51,20 @@ public class Orchestrator : IDisposable
 
     public TaskTracker Tasks => _tasks;
 
-    public Orchestrator(SessionManager manager, IpcManager ipc, Action<string> log)
+    public Orchestrator(SessionManager manager, IpcManager ipc, Action<string> log, LedgerWriters? writers = null)
     {
         _manager = manager;
         _ipc = ipc;
-        _tasks = new TaskTracker();
         _log = log;
+        // One writer per repo, resolved through the SAME registry every other verb uses,
+        // so the ledger can never disagree with what `start` or `shell` think a repo is.
+        // The host passes its registry when it has one — mail ingestion needs the same
+        // instances — and we build one otherwise.
+        _writers = writers ?? new LedgerWriters(ResolveRepoRoot, log);
+        // Tasks are rows in the assignee repo's event log now, not a dictionary that
+        // emptied on restart. That is what stops T001 being issued 23 times and stops
+        // task-complete nacking "unknown task" for work that really happened.
+        _tasks = new TaskTracker(_writers, () => _manager.Repos.Keys, log);
         // GitWorktrees.Identify is what lets the ledger tell a SIBLING worktree of one repo
         // from an unrelated repo that merely shares a relative filename (I014 vs I008). It is
         // consulted only for the non-blocking merge-risk report; when git cannot answer, the
@@ -134,7 +143,7 @@ public class Orchestrator : IDisposable
         Scan();
 
         // Belt-and-braces: recover anything the watcher drops at runtime.
-        var rescanSeconds = _manager.Config.RescanIntervalSeconds;
+        var rescanSeconds = _manager.Config.Settings.Int("rescanIntervalSeconds");
         if (rescanSeconds > 0)
         {
             var interval = TimeSpan.FromSeconds(rescanSeconds);
@@ -145,6 +154,11 @@ public class Orchestrator : IDisposable
         {
             _log("Orchestrator: periodic inbox rescan disabled (rescanIntervalSeconds <= 0)");
         }
+
+        // Units whose dependencies completed while huddle was down (or whose state was
+        // corrected on disk) are dispatchable now; nothing else re-examines the queue
+        // until some session event does. Do it once at start.
+        AdvanceQueue();
     }
 
     // Returns the number of command files actually processed (read + routed, or
@@ -183,6 +197,7 @@ public class Orchestrator : IDisposable
             var recovered = Scan();
             if (recovered > 0)
                 _log($"Orchestrator: periodic rescan recovered {recovered} command(s) the watcher missed");
+            EscalateUnackedTasks();
         }
         catch (Exception ex)
         {
@@ -191,6 +206,55 @@ public class Orchestrator : IDisposable
         finally
         {
             Interlocked.Exchange(ref _rescanning, 0);
+        }
+    }
+
+    /// <summary>
+    /// Spec §5.5. Surface every task that has sat in <c>assigned</c> past
+    /// <c>taskAckMinutes</c> — once each, to the dispatcher by mail and to the operator
+    /// on the console.
+    ///
+    /// <para>Deliberately hung off the EXISTING rescan tick rather than given a timer of
+    /// its own: this is a backstop, and its useful resolution is minutes. It also means
+    /// escalation cannot outlive the loop that recovers dropped commands, so there is one
+    /// heartbeat to reason about rather than two.</para>
+    ///
+    /// <para>"Already escalated" is read back out of the event log, so a restart does not
+    /// re-announce every old assignment at once — which would turn the surface into
+    /// exactly the nag the spec rules out.</para>
+    /// </summary>
+    private void EscalateUnackedTasks()
+    {
+        var ackAfter = TimeSpan.FromMinutes(_manager.Config.Settings.Int("taskAckMinutes"));
+        if (ackAfter <= TimeSpan.Zero) return;
+        var now = DateTimeOffset.UtcNow;
+
+        foreach (var repo in _manager.Repos.Keys)
+        {
+            var writer = _writers.For(repo);
+            if (writer is null) continue;
+            try
+            {
+                var problems = new List<string>();
+                var events = writer.ReadAll(problems);
+                if (events.Count == 0) continue;
+
+                var due = LedgerEscalation.Due(
+                    TaskMaterializer.Materialize(events, problems),
+                    LedgerEscalation.AlreadyEscalated(events), now, ackAfter);
+
+                foreach (var t in due)
+                {
+                    _log(LedgerEscalation.ConsoleLine(repo, t, now));
+                    var (to, subject, body) = LedgerEscalation.Mail(repo, t, now);
+                    if (to != null)
+                        _ipc.Send(HuddleMailbox, to.Replace(':', '_'), subject, body, "info");
+                    // Recorded BEFORE anything can throw on the next task, so a failure
+                    // mid-sweep cannot cause this one to be announced twice.
+                    writer.Append(LedgerEscalation.EscalationEvent(t.Id, now));
+                }
+            }
+            catch (Exception ex) { _log($"Orchestrator: escalation sweep failed for {repo}: {ex.Message}"); }
         }
     }
 
@@ -440,7 +504,7 @@ public class Orchestrator : IDisposable
                          l.SafeName.Equals(safeName, StringComparison.OrdinalIgnoreCase)))
             {
                 _log(ResourceLedger.FormatLeak(safe, entry));
-                if (_manager.Config.ReclaimResourcesOnStop && !string.IsNullOrWhiteSpace(entry.Cleanup))
+                if (_manager.Config.Settings.Bool("reclaimResourcesOnStop") && !string.IsNullOrWhiteSpace(entry.Cleanup))
                     RunReclaim(entry.Cleanup!);
             }
         }
@@ -518,13 +582,30 @@ public class Orchestrator : IDisposable
                 return;
             }
 
-            // Create tracked task
-            var task = _tasks.Create(description, assignTo, msg.From);
+            // Create tracked task. Null means the assignee's repo has no ledger that can
+            // be written, so there is nowhere to record the obligation — nack rather than
+            // hand back a task that looks tracked and is gone at the next restart.
+            var ledger = body.TryGetProperty("ledger", out var lg) ? lg.GetString() : null;
+            var task = _tasks.Create(description, assignTo, msg.From, ledger);
+            if (task is null)
+            {
+                SendNack(msg.From, msg.Subject, $"cannot track a task for {assignTo} — no writable ledger for its repo");
+                return;
+            }
 
-            // Start target if needed
+            // Start target if needed. "Needed" means no session with that identity is
+            // RUNNING — not merely that this huddle's roster has forgotten it. On
+            // 2026-08-23 a delegate-task with startIfNeeded arrived after a reload had
+            // emptied the roster and started a second otherapp:architect over a working
+            // one; the task below then went to a mailbox two sessions were reading.
+            // The mail is sent either way, so a live-but-untracked session still gets it.
             if (startIfNeeded && !_manager.Instances.ContainsKey(assignTo))
             {
-                _manager.Start(repo, persona, prompt: WithShellRules(description));
+                if (_manager.IsLiveButUntracked(assignTo, out var livePid))
+                    _log($"Orchestrator: delegate-task to {assignTo} did NOT start a session — one is already running (PID {livePid}) " +
+                         "but missing from the roster (reload?). The task mail is delivered to it. Run `recover` to re-adopt it.");
+                else
+                    _manager.Start(repo, persona, prompt: WithShellRules(description));
             }
 
             // Send task to target session
@@ -849,7 +930,13 @@ public class Orchestrator : IDisposable
                 var dependsOn = StringArrayProp(t, "dependsOn");
 
                 proposed.Add((claim, persona, prompt));
-                units.Add(new WorkUnit(unitId, resolvedRepo, persona, prompt, files, dependsOn, Project: project));
+                // Optional feature-ledger parent. `project` is a SLUG, not a ledger id, so
+                // it is deliberately not reused here: a unit that names no ledger row
+                // becomes an orphan task, which is the honest reading of dispatched work
+                // nobody ideated — and counting those is half the point of `ledger orphans`.
+                var ledgerParent = StringProp(t, "ledger");
+                units.Add(new WorkUnit(unitId, resolvedRepo, persona, prompt, files, dependsOn,
+                    Project: project, Ledger: string.IsNullOrWhiteSpace(ledgerParent) ? null : ledgerParent));
                 idx++;
             }
 
@@ -924,7 +1011,7 @@ public class Orchestrator : IDisposable
     // between themselves. Recorded claims live in the same claims dir the queue
     // checks, so dispatch-batch still refuses to dispatch a unit over a runtime
     // claimant's files. Two agents executing one plan in parallel while unaware of
-    // each other is the 2026-07-16 incident.
+    // each other is the 2026-07-16 incident (ISSUES.md I005).
     private static int _runtimeClaimSeq;
 
     /// <summary>
@@ -1143,6 +1230,64 @@ public class Orchestrator : IDisposable
         {
             _log($"Orchestrator: auto-release error for {instance.InstanceId}: {ex.Message}");
         }
+
+        try
+        {
+            SettleUnitsForSession(instance, newStatus);
+        }
+        catch (Exception ex)
+        {
+            _log($"Orchestrator: unit settle error for {instance.InstanceId}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// A stopped session's Active units must be settled whether or not a claim file still
+    /// exists. AuditAndReleaseClaims settles only through the claims it finds — and an
+    /// agent that ran `huddle --release` before exiting (the documented commit-then-release
+    /// idiom) leaves none, so its unit stayed Active forever, its dependents never
+    /// dispatched, and the pipeline silently stalled (2026-08-22: settings and ledger-p1
+    /// both finished, both released, both stopped, phase 2 and stats never started).
+    /// Same rule as the claim path: Done needs a clean Stop AND commits in the unit's repo
+    /// since the unit was dispatched; anything else is Failed and the operator re-dispatches.
+    /// </summary>
+    private void SettleUnitsForSession(SessionInstance instance, SessionStatus endStatus)
+    {
+        var sessionId = instance.InstanceId;
+        foreach (var (unit, state) in _queue.All())
+        {
+            if (state != QueueState.Active) continue;
+            if (!$"{unit.Repo}:{unit.Persona}".Equals(sessionId, StringComparison.OrdinalIgnoreCase)) continue;
+
+            var root = _manager.Repos.TryGetValue(unit.Repo, out var def) ? def.Root : null;
+            var since = _queue.PersistedAt(unit.Id);
+            var commits = root != null && since != null
+                ? GitHelper.CommitsSince(root, since.Value.ToString("yyyy-MM-ddTHH:mm:ssZ"))
+                : 0;
+            var finished = endStatus == SessionStatus.Stopped && commits > 0;
+            // Done means DELIVERED, not accepted (§5.3). The queue's own states are
+            // unchanged; what changes is that "someone stopped having committed" no longer
+            // reads as "the work was any good" — that is `ledger accept`, and it is a
+            // separate deliberate act with a gate.
+            var writer = _writers.For(unit.Repo);
+            if (finished)
+            {
+                _queue.MarkDone(unit.Id);
+                var note = $"{sessionId} stopped with {commits} commit(s) since dispatch";
+                _log($"Orchestrator: unit {unit.Id} -> Done — {note}");
+                if (writer is not null)
+                    WorkQueueLedger.OnSettled(writer, unit, QueueState.Done, note, DateTimeOffset.UtcNow, _log);
+            }
+            else
+            {
+                _queue.MarkFailed(unit.Id);
+                var note = $"{sessionId} {endStatus.ToString().ToLowerInvariant()} with no commits since dispatch";
+                _log($"Orchestrator: unit {unit.Id} -> Failed — {note}; dependents stay queued. Re-dispatch to retry.");
+                if (writer is not null)
+                    WorkQueueLedger.OnSettled(writer, unit, QueueState.Failed, note, DateTimeOffset.UtcNow, _log);
+            }
+        }
+        AdvanceQueue();
     }
 
     /// <summary>
@@ -1320,6 +1465,10 @@ public class Orchestrator : IDisposable
             if (ok)
             {
                 _queue.MarkActive(u.Id);
+                // A dispatched unit IS an obligation, and until now it existed only in the
+                // queue's own state file. Opening a task row makes it visible to `ledger`
+                // and to the ack clock alongside every other kind of assignment.
+                if (_writers.For(u.Repo) is { } w) WorkQueueLedger.OnDispatched(w, u, DateTimeOffset.UtcNow, _log);
                 _log($"queue: dispatched {u.Id} -> {sessionId} " +
                      $"[{(string.IsNullOrEmpty(u.Project) ? "no-project" : u.Project)}]" +
                      $"{(Snippet(u.Prompt) is { } t ? $" — task: {t}" : "")}");
@@ -1329,6 +1478,10 @@ public class Orchestrator : IDisposable
                 _claims.Release(sessionId, u.Files);
                 _queue.MarkFailed(u.Id);
                 _log($"queue: {u.Id} failed to start — released its claim");
+                // Opened above only if the session actually started, so there is usually
+                // no row here; OnSettled is a no-op when there is none.
+                if (_writers.For(u.Repo) is { } fw)
+                    WorkQueueLedger.OnSettled(fw, u, QueueState.Failed, "failed to start", DateTimeOffset.UtcNow, _log);
             }
         }
     }

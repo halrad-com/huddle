@@ -183,16 +183,50 @@ public static class LedgerCommands
         return Failed;
     }
 
+    /// <summary>
+    /// `--repo <name>` anywhere in the argument list names the repo the paths belong to,
+    /// overriding HUDDLE_REPO. Without it a session can only claim inside its OWN repo —
+    /// and on 2026-08-22 two myapp sessions edited the same file in netlib (a build
+    /// dependency) with no claim because there was no way to say "netlib" (ISSUES.md
+    /// I015). Returns the remaining args; repoOverride is null when the flag is absent.
+    /// </summary>
+    public static string[] SplitRepoFlag(string[] rest, out string? repoOverride)
+    {
+        repoOverride = null;
+        var kept = new List<string>();
+        for (int i = 0; i < rest.Length; i++)
+        {
+            if (rest[i] == "--repo" && i + 1 < rest.Length) { repoOverride = rest[++i].Trim(); continue; }
+            kept.Add(rest[i]);
+        }
+        return kept.ToArray();
+    }
+
     private static int ClaimCore(string[] rest, Func<string, string?> env, Action<string> outLine)
     {
+        rest = SplitRepoFlag(rest, out var repoOverride);
         if (rest.Length == 0)
         {
-            outLine("usage: huddle --claim <repo-relative-path> [more paths...]");
+            outLine("usage: huddle --claim [--repo <name>] <repo-relative-path> [more paths...]");
             return Usage;
         }
         if (!AllRelative(rest, "claim", outLine)) return Usage;
         if (!TryContext(env, outLine, out var claimsDir, out var instance, out var repo, out var guid))
             return Usage;
+        if (!string.IsNullOrEmpty(repoOverride))
+        {
+            // A cross-repo claim: the root is the NAMED repo's registered root, never this
+            // session's cwd, or the recorded Root would point every reader at the wrong tree.
+            var resolver = BuildRepoResolver(claimsDir);
+            var root = resolver?.Invoke(repoOverride);
+            if (root == null)
+            {
+                outLine($"huddle --claim: --repo '{repoOverride}' is not a registered repo in huddle.json (or no config could be read). Nothing recorded.");
+                return Usage;
+            }
+            repo = repoOverride;
+            env = Override(env, "HUDDLE_REPO_ROOT", root);
+        }
         if (string.IsNullOrEmpty(repo))
         {
             // Warn, don't fail: a repo-less claim collides with EVERY repo (see
@@ -269,16 +303,18 @@ public static class LedgerCommands
 
     private static int ReleaseCore(string[] rest, Func<string, string?> env, Action<string> outLine)
     {
+        rest = SplitRepoFlag(rest, out _); // release matches on session + path; the flag is accepted for symmetry
         if (rest.Length == 0)
         {
-            outLine("usage: huddle --release <repo-relative-path> [more paths...]");
+            outLine("usage: huddle --release [--repo <name>] <repo-relative-path> [more paths...]");
             return Usage;
         }
         if (!AllRelative(rest, "release", outLine)) return Usage;
-        if (!TryContext(env, outLine, out var claimsDir, out var instance, out _, out _))
+        if (!TryContext(env, outLine, out var claimsDir, out var instance, out _, out var guid))
             return Usage;
 
-        var released = LedgerCli.Release(new WorkLedgerClaims(claimsDir, outLine), instance, rest);
+        // The guid keeps a session from releasing a same-named twin's claim (I016).
+        var released = LedgerCli.Release(new WorkLedgerClaims(claimsDir, outLine), instance, rest, guid);
         outLine($"released {released} file(s)");
         return Ok;
     }
@@ -305,6 +341,125 @@ public static class LedgerCommands
     /// is to name files in full), so this is a usage error worth being loud about rather
     /// than something to silently rewrite: huddle cannot know which repo root to strip.
     /// </summary>
+    /// <summary>
+    /// The PreToolUse guard: `huddle --claim-check` runs before every Edit/Write in a
+    /// spawned session, reads the hook's stdin JSON, and REFUSES the edit (exit 2, reason
+    /// on stderr — Claude Code feeds that back to the model) when the file sits inside a
+    /// registered repo and this session holds no claim covering it. Until 2026-08-22 the
+    /// claim rule was prose in a persona; two sessions edited one netlib file at once
+    /// and the only thing that noticed was the operator. This is the enforcement point.
+    ///
+    /// Allowed without a claim: a file outside every registered repo; huddle's own traffic
+    /// and scratch (`ipc/`, `logs/`, `.claude/`, `hooks/`), because mail and scratchpads
+    /// are how coordination happens and must never be gated by it; and anything when the
+    /// ledger context is missing (a session with no HUDDLE_* is pre-ledger and must not be
+    /// stalled — the persona tells it to read the claims dir by hand).
+    /// </summary>
+    public static int RunClaimCheck(string hookStdinJson, Func<string, string?> env, Action<string> stderr)
+    {
+        try { return ClaimCheckCore(hookStdinJson, env, stderr); }
+        catch (Exception ex)
+        {
+            // A guard that crashes must fail OPEN with a visible note, never block every edit.
+            stderr($"huddle --claim-check: {ex.GetType().Name}: {ex.Message} (edit allowed; guard degraded)");
+            return 0;
+        }
+    }
+
+    public const int Block = 2;
+
+    /// <summary>First 8 chars of a session guid — enough to tell two sessions apart in a
+    /// message without printing a full uuid. "(unknown)" when the claim predates OwnerGuid.</summary>
+    private static string Short(string? guid) =>
+        string.IsNullOrEmpty(guid) ? "(unknown)" : guid.Length <= 8 ? guid : guid[..8];
+
+    internal static int ClaimCheckCore(string hookStdinJson, Func<string, string?> env, Action<string> stderr)
+    {
+        var claimsDir = env("HUDDLE_CLAIMS") ?? "";
+        var instance = env("HUDDLE_INSTANCE") ?? "";
+        if (string.IsNullOrEmpty(claimsDir) || string.IsNullOrEmpty(instance)) return 0;
+
+        string? filePath = null;
+        using (var doc = System.Text.Json.JsonDocument.Parse(hookStdinJson))
+        {
+            if (doc.RootElement.TryGetProperty("tool_input", out var ti))
+            {
+                if (ti.TryGetProperty("file_path", out var fp)) filePath = fp.GetString();
+                else if (ti.TryGetProperty("notebook_path", out var np)) filePath = np.GetString();
+            }
+        }
+        if (string.IsNullOrWhiteSpace(filePath)) return 0;
+        var full = Path.GetFullPath(filePath);
+
+        // Which registered repo contains it? Longest root wins (roots nest: I013).
+        var resolver = BuildRepoResolver(claimsDir);
+        if (resolver == null) return 0;
+        var configPath = FindConfig(claimsDir);
+        if (configPath == null) return 0;
+        string? repoName = null, repoRoot = null;
+        foreach (var s in HuddleConfig.Load(configPath).Sessions)
+        {
+            if (string.IsNullOrEmpty(s.Root)) continue;
+            var root = Path.GetFullPath(s.Root).TrimEnd('\\', '/');
+            if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) continue;
+            if (repoRoot == null || root.Length > repoRoot.Length) { repoRoot = root; repoName = s.Name; }
+        }
+        if (repoRoot == null) return 0;
+
+        var rel = Path.GetRelativePath(repoRoot, full).Replace('\\', '/');
+        var first = rel.Split('/')[0];
+        if (first is "ipc" or "logs" or ".claude" or "hooks") return 0;
+
+        var claims = new WorkLedgerClaims(claimsDir, _ => { }, resolver, GitWorktrees.Identify).ReadAll();
+        static string Norm(string p) => p.Replace('\\', '/').TrimStart('.', '/').ToLowerInvariant();
+
+        // "Mine" is this INSTANCE, not merely this name. Two sessions can share one
+        // `repo:persona` (I016), and on SessionId alone each would read the other's claim
+        // as its own and be waved through — the guard would certify exactly the collision
+        // it exists to stop. OwnerGuid is the conversation id, unique per session; when
+        // both sides carry one they must agree. A claim written before OwnerGuid existed
+        // has none, so it still matches by name: an old ledger keeps working, and the
+        // failure direction is the safe one (an unclaimed edit is refused, never allowed).
+        var myGuid = env("HUDDLE_GUID") ?? "";
+        bool IsMine(WorkLedgerClaim c)
+        {
+            if (!c.SessionId.Equals(instance, StringComparison.OrdinalIgnoreCase)) return false;
+            if (string.IsNullOrEmpty(c.OwnerGuid) || string.IsNullOrEmpty(myGuid)) return true;
+            return c.OwnerGuid.Equals(myGuid, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var mine = claims.Where(IsMine).ToList();
+        foreach (var c in mine)
+        {
+            // A claim matches when it names this file in this repo (by name, or by the
+            // recorded Root resolving to the same physical file).
+            var sameRepo = c.Repo.Equals(repoName, StringComparison.OrdinalIgnoreCase) ||
+                           (!string.IsNullOrEmpty(c.Root) && Path.GetFullPath(c.Root).TrimEnd('\\', '/').Equals(repoRoot, StringComparison.OrdinalIgnoreCase));
+            if (sameRepo && c.Files.Any(f => Norm(f) == Norm(rel))) return 0;
+        }
+
+        var holders = claims
+            .Where(c => !IsMine(c))   // not "not my name": a twin sharing my identity IS another holder
+            .Where(c => (c.Repo.Equals(repoName, StringComparison.OrdinalIgnoreCase) ||
+                        (!string.IsNullOrEmpty(c.Root) && Path.GetFullPath(c.Root).TrimEnd('\\', '/').Equals(repoRoot, StringComparison.OrdinalIgnoreCase)))
+                        && c.Files.Any(f => Norm(f) == Norm(rel)))
+            .Select(c => c.SessionId.Equals(instance, StringComparison.OrdinalIgnoreCase)
+                ? $"ANOTHER SESSION ALSO CALLED {c.SessionId} (session {Short(c.OwnerGuid)}, yours is {Short(myGuid)}) since {c.ClaimedAt.ToUniversalTime():yyyy-MM-dd HH:mm}Z"
+                : $"{c.SessionId} since {c.ClaimedAt.ToUniversalTime():yyyy-MM-dd HH:mm}Z")
+            .ToList();
+
+        var ownRepo = (env("HUDDLE_REPO") ?? "").Equals(repoName, StringComparison.OrdinalIgnoreCase);
+        var cmd = ownRepo ? $"huddle --claim {rel}" : $"huddle --claim --repo {repoName} {rel}";
+        stderr($"EDIT BLOCKED by huddle: {instance} holds no claim on {repoName}:{rel}.");
+        if (holders.Count > 0)
+            stderr($"  HELD BY {string.Join("; ", holders)} - mail them and agree who goes first.");
+        stderr($"  To proceed: run `{cmd}` (read the output - it names any other holder), then retry the edit.");
+        return Block;
+    }
+
+    private static Func<string, string?> Override(Func<string, string?> env, string key, string value) =>
+        k => k == key ? value : env(k);
+
     private static bool AllRelative(string[] paths, string verb, Action<string> outLine)
     {
         foreach (var p in paths)

@@ -185,4 +185,30 @@ public class GitActivityTests
             try { Directory.Delete(dir, recursive: true); } catch { }
         }
     }
+
+    [Fact]
+    public void Movement_line_uses_identity_when_known()
+    {
+        var raw = "bab3978e3fc34ceaa478670436992a70a9b825d8 97a3aa8747d4ff6158492d9277f859cfbe773763 you <s@x> 1787375264 -0700\tupdate by push";
+        var line = GitActivityMonitor.FormatMovementLine("myapp", "origin/master", raw, "dev.azure.com/contoso/LIB");
+        Assert.Equal("[git] myapp pushed to dev.azure.com/contoso/LIB (master 97a3aa8)", line);
+    }
+
+    [Fact]
+    public void Movement_line_falls_back_without_identity()
+    {
+        var raw = "a b you <s@x> 1 -0700\tupdate by push";
+        Assert.Equal("[git] r pushed to origin/master (b)", GitActivityMonitor.FormatMovementLine("r", "origin/master", raw));
+    }
+
+    [Theory]
+    [InlineData("origin/master", "origin", "master")]
+    [InlineData("origin/feat/x", "origin", "feat/x")]
+    [InlineData("github/main", "github", "main")]
+    [InlineData("nolash", "nolash", "")]
+    public void Splits_reference(string r, string remote, string branch)
+    {
+        var (a, b) = GitActivityMonitor.SplitReference(r);
+        Assert.Equal(remote, a); Assert.Equal(branch, b);
+    }
 }

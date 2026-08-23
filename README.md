@@ -51,7 +51,7 @@ What you won't get from a terminal full of `claude` tabs:
 
 ## Why Huddle
 
-- **Crash protection that resumes, not just restarts.** Huddle began life as *myapp*, a crash wrapper for Claude Code sessions — your myapp against AI whiplash. It grew into something better: crashed sessions are isolated so they can't take anything else down, and the work ledger + scratchpad convention means a restarted agent picks up mid-task *with its context*. Watch a crash, type `restart`, and it carries on where it left off.
+- **Crash protection that resumes, not just restarts.** Huddle began life as *seatbelt*, a crash wrapper for Claude Code sessions — your seatbelt against AI whiplash. It grew into something better: crashed sessions are isolated so they can't take anything else down, and the work ledger + scratchpad convention means a restarted agent picks up mid-task *with its context*. Watch a crash, type `restart`, and it carries on where it left off.
 - **Human console AND agent-to-agent coordination — both, not either.** Most tools pick headless AI-to-AI or a human dashboard. Huddle is a human operator's console over a live inter-agent mail system.
 - **Fully auditable AI-to-AI communication.** Every message between agents is a JSON file on disk — inspectable, greppable, replayable. No opaque channels.
 - **Capture-to-test replay engine.** Agents freeze their verifications into regression suites as they work; `replay <repo>` re-runs the accumulated suite against a live instance. Verification becomes an asset, not an event.
@@ -279,6 +279,7 @@ Run `help` in huddle for the live version. Current commands:
 | `conflicts` | Show file claim overlaps across sessions — freeform ledger and orchestrator claims both. |
 | `janitor` | Report leaked session resources — resource-ledger entries never marked cleaned whose process is still alive. |
 | `queue` | Show the dispatch-batch work queue — active / queued (with what they wait on) / done / failed. |
+| `settings [key [value]]` | Show every setting with its value, where the value came from, and whether it applies live or on reload. `settings <key> <value>` validates and writes back to `huddle.json`; `settings unset <key>` reverts to the built-in default. See [Settings](docs/settings.md). |
 | `docs [plans\|logs]` | List documents sessions created, newest first. Default shows Docs (deliverables); `plans` adds Plans; `logs` adds git working-tree churn. See [Document log](#document-log). |
 | `open <n>` | Open the nth document from the last `docs` listing via the OS file handler. |
 | `find <kw> [@repo] [-Nh\|-Nd\|-Nw]` | Content search across doc bodies, session transcripts, scratchpads, and IPC mail — grouped hits, `open <n>` / `resume <n>` interop. |
@@ -289,6 +290,7 @@ Run `help` in huddle for the live version. Current commands:
 | `recover [n\|all\|dismiss n]` | List sessions lost to a crash — persona, declared purpose, last evidence, hubs first — and relaunch them show-and-pick. Dismissals archive, never delete. |
 | `projects [html [path]]` | List projects discovered from `docs/projects/<slug>/` across repos (+ map overlay). `projects html` writes a self-contained status page — the reproducible output report. |
 | `project <slug>` | Project detail: goal, sprint, artifacts (wired into `open <n>`), live sessions, claims, recoverables. |
+| `stats [<repo>] [--who] [--since 30d\|12h] [html]` | What moved where, who touched it, how much, when — per repo: remotes by identity, pushes/fetches, commits and unpushed, churn, attribution (**exact** vs **inferred**, always labelled), session time, work, health. `--who` pivots by session; `stats html` writes a self-contained page with a per-repo commit heatmap. Computed from corpora huddle already holds, so it answers for past days. See [Repo stats](docs/repo-stats.md). |
 | `replay <repo>` | Run the repo's captured regression tests (MBXHVAL capture suites) via `mbxhval`. See [Capture replay](#capture-replay). |
 | `scan` | Re-scan huddle's inbox for any commands the watcher missed. |
 | `ver` | Show huddle's version (branch, commit, build time). |
@@ -308,6 +310,9 @@ precisely so they keep working when huddle is not:
 | `huddle --claim <path> [more...]` | Record a claim on repo-relative paths and report any other holder. See [Claiming files](#claiming-files). |
 | `huddle --release <path> [more...]` | Release files from your own claims. |
 | `huddle --ledger [repo]` | Print the ledger: what is claimed, by whom, since when. |
+| `huddle --settings` | List every setting with value, source, and applies-when. Exit 1 if the config would not load. |
+| `huddle --set <key> <value>` | Validate and write one setting into `huddle.json`. Refuses unknown keys by name (with a did-you-mean) and out-of-range values with the range. |
+| `huddle --unset <key>` | Remove a setting, reverting it to the built-in default. |
 | `huddle --projects-html <out.html> [--config <path>]` | Render the projects status page headlessly and exit. |
 | `huddle --config <path>` | Start normally against a specific config file. |
 
@@ -535,6 +540,10 @@ Huddle loads `huddle.json` from the current directory by default. Everything els
   "autoRestart": false,
   "maxAutoRestarts": 3,
   "backoffSeconds": [2, 5, 15],
+  "settings": {
+    "taskAckMinutes": 15,
+    "statsSinceDays": 7
+  },
   "groups": {
     "dev": [
       { "repo": "myapp", "persona": "backenddev", "prompt": "continue where you left off" },
@@ -545,6 +554,11 @@ Huddle loads `huddle.json` from the current directory by default. Everything els
 ```
 
 `huddle dev` launches every session in the `dev` group.
+
+The keys shown above the `settings` block are the original top-level ones. They still work
+and are labelled `top-level (legacy)` wherever settings are displayed, but new knobs go in
+`"settings"`, where they are validated at load — an unknown or out-of-range key is refused
+by name instead of silently ignored. Full list and behaviour: [Settings](docs/settings.md).
 
 ---
 
@@ -651,10 +665,3 @@ Everything is relative to the config file location. Drop `publish\huddle.exe` wh
 - **C# / .NET 8** — console application.
 - **`System.Text.Json`** and **`System.Diagnostics.Process`** — that's the dependency list.
 - **PowerShell 5.1** — for the statusline script only; nothing huddle itself depends on.
-
----
-
-## License
-
-Apache License 2.0 — see [LICENSE](LICENSE). Attribution notices in [NOTICE](NOTICE)
-must be preserved in redistributions, per the license terms.

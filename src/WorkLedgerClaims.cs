@@ -9,7 +9,7 @@ namespace Huddle;
 /// </summary>
 public sealed record WorkLedgerClaim(
     string SessionId,       // display form, e.g. "huddle:backenddev"
-    string Repo,            // repo name, e.g. "myapp"
+    string Repo,            // repo name, e.g. "corelib"
     string BatchId,         // e.g. "B-20260421-231500"
     DateTime ClaimedAt,     // UTC
     string BaseCommit,      // 40-char sha
@@ -347,7 +347,7 @@ public class WorkLedgerClaims
     /// Remove specified files from a session's claim(s). If a claim has no files remaining, delete it.
     /// Returns how many files were released (across possibly multiple claim files).
     /// </summary>
-    public int Release(string sessionId, IEnumerable<string> files)
+    public int Release(string sessionId, IEnumerable<string> files, string? ownerGuid = null)
     {
         lock (_lock)
         {
@@ -365,6 +365,11 @@ public class WorkLedgerClaims
                 var claim = ReadFile(path);
                 if (claim == null) continue;
                 if (!claim.SessionId.Equals(sessionId, StringComparison.OrdinalIgnoreCase)) continue;
+                // A session may only release its OWN claim. Where two sessions share one
+                // name (I016) the guid separates them; without it, releasing would strip
+                // the other's protection while reporting success.
+                if (!string.IsNullOrEmpty(ownerGuid) && !string.IsNullOrEmpty(claim.OwnerGuid) &&
+                    !claim.OwnerGuid.Equals(ownerGuid, StringComparison.OrdinalIgnoreCase)) continue;
 
                 var remaining = claim.Files.Where(f => !toRelease.Contains(NormPath(f))).ToList();
                 var matched = claim.Files.Count - remaining.Count;
@@ -641,6 +646,24 @@ public class WorkLedgerClaims
     /// Find where any of the proposed claims overlap any of the existing active claims
     /// (held by a different session, on the same physical file — see <see cref="PairBasis"/>).
     /// </summary>
+    /// <summary>
+    /// Are these two claims the SAME session — the test behind "a session may always extend
+    /// its own claim"? The name is not sufficient: two sessions can share one
+    /// `repo:persona` (I016, 2026-08-23 — a reload's empty roster let a second
+    /// otherapp:architect start over a live one), and on name alone each would be treated as
+    /// the other extending itself, so their overlap on one file reported as no conflict at
+    /// all. OwnerGuid is the conversation id, unique per session; when both carry one they
+    /// must agree. Claims written before OwnerGuid existed carry none and still match by
+    /// name, so an old ledger keeps working and the failure direction stays safe:
+    /// over-reporting a conflict costs a mail, under-reporting costs the file.
+    /// </summary>
+    public static bool IsSameSession(WorkLedgerClaim a, WorkLedgerClaim b)
+    {
+        if (!a.SessionId.Equals(b.SessionId, StringComparison.OrdinalIgnoreCase)) return false;
+        if (string.IsNullOrEmpty(a.OwnerGuid) || string.IsNullOrEmpty(b.OwnerGuid)) return true;
+        return a.OwnerGuid.Equals(b.OwnerGuid, StringComparison.OrdinalIgnoreCase);
+    }
+
     public static List<ClaimOverlap> FindConflictsWithActive(
         IReadOnlyList<WorkLedgerClaim> proposed,
         IReadOnlyList<WorkLedgerClaim> active,
@@ -651,7 +674,7 @@ public class WorkLedgerClaims
         {
             foreach (var a in active)
             {
-                if (a.SessionId.Equals(p.SessionId, StringComparison.OrdinalIgnoreCase))
+                if (IsSameSession(a, p))
                     continue; // same session can extend its own claim
                 var basis = PairBasis(p, a, resolveRoot);
                 if (basis == null) continue;
@@ -700,7 +723,7 @@ public class WorkLedgerClaims
         {
             foreach (var a in active)
             {
-                if (a.SessionId.Equals(p.SessionId, StringComparison.OrdinalIgnoreCase))
+                if (IsSameSession(a, p))
                     continue; // a session in two checkouts is still one session's own business
                 var basis = WarnBasis(p, a, resolveRoot, identifyCheckout, cache);
                 if (basis == null) continue;

@@ -88,6 +88,18 @@ public class WorkQueue
         lock (_lock) { return _units.Values.Select(u => (u, _state[u.Id])).ToList(); }
     }
 
+    /// <summary>
+    /// When this unit's persisted record was last written — which, for an Active unit, is
+    /// the moment it was dispatched (MarkActive persists). Used as the "since" for the
+    /// did-it-ship commit check at settle time. Null when the queue is in-memory only.
+    /// </summary>
+    public DateTime? PersistedAt(string id)
+    {
+        if (_dir == null) return null;
+        var path = Path.Combine(_dir, id.Replace(':', '_').Replace('/', '_') + ".json");
+        return File.Exists(path) ? File.GetLastWriteTimeUtc(path) : null;
+    }
+
     private sealed record Persisted(WorkUnit Unit, QueueState State);
 
     private void Persist(string id)

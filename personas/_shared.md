@@ -84,12 +84,12 @@ standalone truth; huddle's `projects` / `project <slug>` verbs are the lens over
 
 **Rule: no substantive edits without a claim in the ledger.** On 2026-07-16 two sessions
 executed the same plan in parallel with no claims — duplicated hours, corrupted a
-product file. The freeform ledger alone did not prevent it.
+product file (ISSUES.md I005). The freeform ledger alone did not prevent it.
 
 **Claims go straight to the ledger now — not through huddle.** The old protocol had you
 mail a `claim` command to the orchestrator and wait for an ack. On 2026-08-16 huddle was
 down: the mail sat unread in `_huddle/inbox/`, no claim was ever recorded, and two
-`myapp` agents worked the same files invisible to each other. So
+`myapp` agents worked the same files invisible to each other (ISSUES.md I011). So
 the write path no longer runs through an arbiter. `huddle --claim` / `--release` /
 `--ledger` run the **binary** — they read and write `ipc/workledger/claims/` directly and
 work whether or not the console is up. Your identity and the ledger's location arrive as
@@ -159,6 +159,12 @@ HUDDLE_REPO=<your registered repo name> \
 exactly as it appears in `logs/context.md`. Paths are **repo-relative** — an absolute path
 records a claim that matches nobody and is rejected.
 
+**Editing a file in a repo that is not your own** (a build dependency, a sibling repo)?
+Name it: `huddle --claim --repo netlib src/netcfg/netcfgManager.cs`. Without `--repo`
+the claim lands in YOUR repo and protects nothing — on 2026-08-22 two sessions edited one
+netlib file blind because neither could say "netlib" (ISSUES.md I015). Same flag on
+`--release`. The mail route takes `"repo":"netlib"` in the body.
+
 **Reading the ledger never needs tooling at all.** Claims are plain markdown in
 `ipc/workledger/claims/`. Glob and Read them directly whenever you want to see who holds
 what — that works with huddle up or down, with or without the CLI.
@@ -176,7 +182,8 @@ said.
 
 **Re-read immediately before editing.** The working directory is shared and siblings are
 active, so a file may have changed since you last read it. Read → edit as one tight
-sequence; never act on a read from twenty minutes ago.
+sequence; never act on a read from twenty minutes ago. (Both rules from
+`myapp:documenter`'s 2026-08-16 working-rules broadcast.)
 
 **When in doubt, ask.** A question to the operator costs one turn. An unauthorised merge, a
 wrong-configuration build, or a `git add -A` costs an afternoon.
@@ -353,17 +360,15 @@ If your session stops (normal or crash) without releasing, the orchestrator auto
 
 ## Capture-to-Test — freeze your verifications into regression tests
 
-When you verify a change by exercising it (an HTTP endpoint, a CLI run), **freeze that
-check into a permanent regression capture in the same commit** — the test ships with the
-code it tests, not as a separate afterthought.
+When you verify a change by calling an HTTP endpoint (e.g. confirming a search behaves as
+expected), **freeze that check into a permanent regression test in the same commit** — the
+test ships with the code it tests, not as a separate afterthought.
 
-- Write the capture in whatever format this repo's configured replay runner consumes:
-  `replayCommand` (any harness emitting the summary JSON), or MBXHVAL suites
-  (https://github.com/halrad-com/MBXHVAL) if the repo uses the MBXHVAL runner
-  (suites in `MBXHVAL/tests/suites/captures/<short-name>.yaml`; create the dir if absent).
-- Prefer **invariant gates** — properties true for *any* data state — so the test holds
-  against live data and doesn't rot when unrelated data changes. In MBXHVAL suites that's
-  the `each:`/`all:` operators. Example:
+- Write an MBXHVAL capture suite into the repo's captures dir:
+  `MBXHVAL/tests/suites/captures/<short-name>.yaml` (create the dir if it doesn't exist).
+- Prefer **invariant gates** — properties true for *any* data state — using the `each:`/`all:`
+  operator, so the test holds against the live library and doesn't rot when unrelated data
+  changes. Example:
   ```yaml
   tests:
     - id: CAP-search-albumartist
@@ -376,12 +381,13 @@ code it tests, not as a separate afterthought.
   ```
 - Gate ONLY the fields your verification actually cared about. Leave volatile fields
   (scores, timings, ids) unlisted — unlisted means not asserted.
-- Make the gate match the REAL contract: exact filter → `each:exact:`; a fuzzy/ranked
-  match → a weaker true invariant (`each:contains:`, or "first result matches").
+- Make the gate match the endpoint's REAL contract: exact filter → `each:exact:`; a
+  fuzzy/ranked match → a weaker true invariant (`each:contains:`, or "first result matches").
   An overstated gate is a false-red waiting to happen.
-- Commit the capture together with the code change.
+- Commit the capture suite together with the code change.
 
-The operator replays a repo's accumulated captures from huddle with `replay <repo>`.
+The operator replays a repo's captures from huddle with `replay <repo>`, which runs every
+suite in that repo's `captures/` dir against its configured test instance via mbxhval.
 
 ## Spawned resources
 

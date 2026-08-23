@@ -51,8 +51,8 @@ public class VerbCompleterTests
         // ?, h, msg, unread, goto, rebuild, handoff, version) are excluded.
         // Adding a verb to that switch means adding it here and bumping this
         // count; this assertion is what makes forgetting the catalog a failure.
-        Assert.Equal(37, Verbs.Catalog.Count);
-        Assert.Equal(37, Verbs.Catalog.Select(v => v.Name).Distinct().Count());
+        Assert.Equal(40, Verbs.Catalog.Count);
+        Assert.Equal(40, Verbs.Catalog.Select(v => v.Name).Distinct().Count());
     }
 
     [Fact]
@@ -62,5 +62,17 @@ public class VerbCompleterTests
         Assert.Contains("broadcast", names);
         Assert.Contains("say", names);
         Assert.Contains("status", names);
+    }
+
+    [Fact]
+    public void Stats_is_in_the_catalog_with_argument_grammar()
+    {
+        // Argument-level help is the feature, not verb completion alone: typing
+        // "stats " must show the grammar, or the verb reads as unfinished.
+        Assert.Contains("stats", Verbs.Catalog.Select(v => v.Name));
+        var hint = new ArgCompleter(new ArgProviders()).Hint("stats ");
+        Assert.Contains("--who", hint);
+        Assert.Contains("--since", hint);
+        Assert.Contains("html", hint);
     }
 }

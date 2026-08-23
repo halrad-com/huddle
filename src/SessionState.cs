@@ -103,6 +103,22 @@ public static class SessionState
         File.WriteAllText(stateFile, json);
     }
 
+    /// <summary>
+    /// The recorded entries, for read-only views (stats' session roster). Recovery has
+    /// always deserialised this file inline; this is the same read exposed without the
+    /// side effects, and it never throws — a missing or corrupt state file yields an
+    /// empty roster rather than failing the verb that asked.
+    /// </summary>
+    public static List<SessionStateEntry> LoadEntries(string stateFile)
+    {
+        if (!File.Exists(stateFile)) return [];
+        try
+        {
+            return JsonSerializer.Deserialize<List<SessionStateEntry>>(File.ReadAllText(stateFile)) ?? [];
+        }
+        catch { return []; }
+    }
+
     public static int Recover(
         string stateFile,
         SessionManager manager,

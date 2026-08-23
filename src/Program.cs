@@ -68,6 +68,19 @@ class Program
         if (args.Length >= 1 && args[0] == "--ledger")
             return LedgerCommands.RunLedger(args[1..], Environment.GetEnvironmentVariable, Console.WriteLine);
 
+        // PreToolUse guard (see LedgerCommands.RunClaimCheck). Claude Code hands the tool
+        // call as JSON on stdin; exit 2 blocks the tool and stderr goes back to the model.
+        if (args.Length >= 1 && args[0] == "--claim-check")
+            return LedgerCommands.RunClaimCheck(Console.In.ReadToEnd(), Environment.GetEnvironmentVariable, Console.Error.WriteLine);
+
+        // Settings access, same dispatch position and for the same reason: changing a
+        // knob must not require launching the orchestrator, and must work from a script
+        // or a second window while huddle is running. Position-independent: the
+        // documented `huddle --config <path> --set k v` used to fall through here and
+        // silently boot a second orchestrator (S3).
+        if (SettingsCli.FindVerb(args) != null)
+            return SettingsCli.Run(args, Console.WriteLine);
+
         // Enable VT processing so OSC 8 hyperlinks (docs/history listings) work when
         // huddle runs under legacy conhost. When the console can't do VT, fall back
         // to plain-text titles instead of spewing raw escape sequences.
@@ -77,23 +90,12 @@ class Program
         // ApplicationIcon covers Explorer only; the live window needs WM_SETICON.
         ConsoleIcon.TrySet();
 
-        // Find config path
-        var configPath = "huddle.json";
-        for (int i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] is "--config" or "-c")
-            {
-                configPath = args[i + 1];
-                break;
-            }
-        }
-
-        // Fallback to old config name
-        if (!File.Exists(configPath) && configPath == "huddle.json" && File.Exists("myapp.json"))
-        {
-            configPath = "myapp.json";
+        // Find config path — the shared resolver, so the console and `huddle --settings`
+        // can never disagree about which file exists (S6). It applies the myapp.json
+        // fallback itself; the note below is the only thing this caller adds.
+        var configPath = ConfigPathResolver.Resolve(args);
+        if (Path.GetFileName(configPath) == ConfigPathResolver.Legacy)
             ConsoleUI.Log("Note: rename myapp.json to huddle.json");
-        }
 
         // First-run bootstrap: copy template.json -> huddle.json so a fresh
         // clone has a starting config sitting next to its required siblings
@@ -120,6 +122,17 @@ class Program
         try
         {
             config = HuddleConfig.Load(configPath);
+        }
+        catch (SettingsException ex)
+        {
+            // Starting with settings the operator does not have is worse than not
+            // starting. Print EVERY problem, not just the first.
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("huddle.json settings refused — not starting:");
+            foreach (var e in ex.Errors) Console.WriteLine($"  {e}");
+            Console.ResetColor();
+            Console.WriteLine("Fix with: huddle --set <key> <value>   or   huddle --unset <key>");
+            return 1;
         }
         catch (FileNotFoundException)
         {
@@ -153,6 +166,11 @@ class Program
             return 1;
         }
 
+        // A key set both top-level and in "settings" is resolved to "settings" and said
+        // out loud here — reported, never silently resolved.
+        foreach (var warning in config.Settings.Warnings)
+            ConsoleUI.Log(warning);
+
         // Resolve claude path
         string claudePath;
         try
@@ -173,8 +191,8 @@ class Program
 
         // Singleton guard. Two huddle instances sharing one root double-execute
         // every inbox command — two spawns per start, two workers per dispatch,
-        // context.md ping-ponging between two registries (2026-07-16 incident).
-        // Keyed to the root directory so separate huddle roots
+        // context.md ping-ponging between two registries (2026-07-16 incident,
+        // ISSUES.md I006). Keyed to the root directory so separate huddle roots
         // can still run side-by-side. An abandoned mutex (previous instance
         // crashed while holding it) still counts as acquired.
         var rootKey = Path.GetFullPath(configDir).TrimEnd(Path.DirectorySeparatorChar).ToLowerInvariant();
@@ -208,13 +226,19 @@ class Program
         ConsoleUI.SetLogFile(Path.Combine(dataDir, "huddle.log"));
 
         // Create components
-        var contextWriter = config.ContextFile ? new ContextWriter(dataDir, ConsoleUI.Log) : null;
+        var contextWriter = config.Settings.Bool("contextFile") ? new ContextWriter(dataDir, ConsoleUI.Log) : null;
         var contextPath = contextWriter?.ContextPath;
         var manager = new SessionManager(config, claudePath, dataDir, personasDir, contextPath, ConsoleUI.Log);
 
+        // The orchestrator is the ONLY process that appends to a repo's events.jsonl
+        // (spec §2.2), so one registry of per-repo writers is shared by everything that
+        // records an obligation: mail ingestion, TaskTracker, the work queue, escalation.
+        var ledgerWriters = new LedgerWriters(
+            repo => manager.Repos.TryGetValue(repo, out var def) ? def.Root : null, ConsoleUI.Log);
+
         // IPC
         IpcManager? ipcManager = null;
-        if (config.Ipc)
+        if (config.Settings.Bool("ipc"))
         {
             ipcManager = new IpcManager(Path.Combine(configDir, "ipc"), ConsoleUI.Log);
             manager.Ipc = ipcManager;
@@ -245,10 +269,31 @@ class Program
                 // Make the path relative to the huddle root so the nudge stays short
                 // and the agent can read it as-is. The mail stays in inbox/ until the
                 // agent acknowledges it, so this points there.
-                var relPath = Path.GetRelativePath(configDir, filePath).Replace('\\', '/');
+                var relPath = LedgerMailIngest.MailRef(configDir, filePath);
 
-                var subject = (msg.Subject ?? "").Replace("\r\n", " ").Replace("\r", " ").Replace("\n", " ");
-                var nudge = $"[huddle mail from {msg.From}] {subject} — read {relPath}";
+                // Spec §5.4: a task mail opens a tracked row in the RECIPIENT's repo
+                // ledger, whoever sent it and without anyone running a command. Keyed on
+                // the mail file, so the FSW delivery, the retry tick and a restart's
+                // rescan all re-find the same row rather than opening three. This is the
+                // change that catches peer-to-peer dispatch — the audit's four dropped
+                // assignments were all type:"task".
+                LedgerId? taskId = null;
+                if (LedgerMailIngest.IsTask(msg) && ledgerWriters.ForInstance(instanceId) is { } writer)
+                {
+                    if (writer.TryFindTaskByRef(relPath, out var existing)) taskId = existing;
+                    else
+                    {
+                        taskId = writer.AppendNewTask(id =>
+                            LedgerMailIngest.Assigned(msg, relPath, instanceId, id, DateTimeOffset.UtcNow)!);
+                        if (taskId is { } opened)
+                            ConsoleUI.Log($"ledger: {opened} assigned to {instanceId} by {msg.From}");
+                    }
+                }
+
+                // A task must not read like an FYI in the one line an agent often sees
+                // before deciding whether to interrupt itself (§5.8). A ledger that could
+                // not be written still gets the ordinary line — never no line at all.
+                var nudge = LedgerMailIngest.NudgeLine(msg, relPath, taskId);
 
                 // Deliver the wake line as pulled context via the session's
                 // pending-context file (drained by its Stop/UserPromptSubmit hook)
@@ -256,9 +301,57 @@ class Program
                 // console is never stomped. Returning true records the announcement
                 // so it is never repeated; clearing the inbox is the agent's job.
                 ipcManager.AppendPending(inst.SafePathName, nudge);
+
+                // pending.txt is DRAINED BY A HOOK, and the hooks that drain it (Stop,
+                // UserPromptSubmit) fire on a turn boundary. An idle session ends no turn
+                // and submits nothing, so without this the line sits unread until a human
+                // types into that console — on 2026-08-22 two fix tasks sat 27 minutes
+                // exactly this way. Nudge the console with a one-line submit; the
+                // UserPromptSubmit hook folds the pending context onto it.
+                //
+                // Inject keeps its foreground gate, so an operator typing at the recipient's
+                // console is never stomped; a held wake is re-driven by IpcManager's retry
+                // tick (WakeIdle below) once they step away.
+                if (MailWake.ShouldWakeSession(TranscriptOf(inst), MailWake.IdleAfter))
+                    PromptInjector.Inject(pid, MailWake.WakeLine, ConsoleUI.Log);
                 return true;
             };
+
+            // Re-drive of the same nudge for mail whose wake was held (operator was at
+            // the console) or whose recipient went idle after delivery. The delivered
+            // index stops MessageReceived re-firing for already-announced mail, so
+            // without this a session that idled with a full pending.txt is never woken.
+            ipcManager.WakeIdle = safePathName =>
+            {
+                var inst = manager.Instances.Values.FirstOrDefault(
+                    i => i.SafePathName == safePathName && i.IsAlive);
+                var pid = inst?.Process?.Id ?? 0;
+                if (inst is null || pid <= 0) return false;
+                if (!MailWake.ShouldWakeSession(TranscriptOf(inst), MailWake.IdleAfter)) return false;
+                return PromptInjector.Inject(pid, MailWake.WakeLine, ConsoleUI.Log);
+            };
+
+            // Mail leaving the inbox is acknowledgement, and acknowledgement is the
+            // timestamp the old task tracking never had — the audit could only
+            // approximate age-at-read from archive mtimes. AckIfOpen is a no-op for the
+            // mail that opened no task, which is most of it.
+            ipcManager.MailAcknowledged = (safePathName, mailFileNames) =>
+            {
+                var inst = manager.Instances.Values.FirstOrDefault(i => i.SafePathName == safePathName);
+                if (inst is null || ledgerWriters.ForInstance(inst.InstanceId) is not { } writer) return;
+                foreach (var name in mailFileNames)
+                {
+                    var rel = LedgerMailIngest.MailRef(configDir, ipcManager.IpcDir, safePathName, name);
+                    LedgerMailIngest.AckIfOpen(writer, rel, inst.InstanceId, DateTimeOffset.UtcNow, ConsoleUI.Log);
+                }
+            };
         }
+
+        // Transcript mtime is huddle's only read on whether a session is mid-turn.
+        static string? TranscriptOf(SessionInstance inst) =>
+            inst.SessionId is { } sid
+                ? SessionTrouble.TranscriptPath(MailWake.ProjectsRoot, inst.Root, sid)
+                : null;
 
         // Orchestrator (started later — after repo registration — so its startup
         // inbox scan resolves repos correctly; see below)
@@ -268,10 +361,11 @@ class Program
             orchestrator = new Orchestrator(manager, ipcManager, ConsoleUI.Log);
         }
 
-        var ui = new ConsoleUI(manager) { Ipc = ipcManager, Orchestrator = orchestrator };
+        var ui = new ConsoleUI(manager) { Ipc = ipcManager, Orchestrator = orchestrator, ConfigPath = configPath };
 
         // State persistence
         var stateFile = Path.Combine(dataDir, "state.json");
+        manager.StateFile = stateFile;   // lets the spawn guard consult the on-disk roster
 
         // Wire up state change notifications
         manager.SessionStateChanged += (instance, newStatus) =>
@@ -280,7 +374,11 @@ class Program
                 ConsoleUI.LogCrash($"*** CRASH *** {instance.InstanceId} exited with code {instance.LastExitCode}");
 
             contextWriter?.Update(manager.Instances);
-            SessionState.Save(stateFile, manager.Instances, manager.Recoverable);
+            // Never persist a roster recovery has not finished filling: that write would
+            // replace the record of every still-live session with whatever is in memory
+            // so far, and the sessions it forgets become invisible — and then duplicable.
+            if (manager.RecoveryComplete)
+                SessionState.Save(stateFile, manager.Instances, manager.Recoverable);
         };
 
         // Register repo definitions
@@ -296,18 +394,28 @@ class Program
         // prompt-spam class can't regress per-repo. Merge-only; silent when already
         // seeded; `"seedPermissions": false` in huddle.json disables.
         PermissionSeeder.SeedAll(
-            config.Sessions.Select(s => (s.Name, s.Root)), config.SeedPermissions, ConsoleUI.Log);
+            config.Sessions.Select(s => (s.Name, s.Root)), config.Settings.Bool("seedPermissions"), ConsoleUI.Log);
 
-        // Start the orchestrator only after repo definitions are registered.
-        // Its startup inbox scan can process commands that resolve against the
-        // repo registry (start-session, repo-scoped broadcast); starting it
-        // earlier made those nack with "unknown repo" for stale inbox files.
-        orchestrator?.Start();
-
-        // Recover sessions from previous run
+        // Recover sessions from the previous run BEFORE the orchestrator runs anything.
+        //
+        // Order is load-bearing (2026-08-23): Start() scans the command inbox and advances
+        // the work queue, and both can SPAWN. Run against a roster that recovery has not
+        // filled yet, `startIfNeeded` and `GenerateInstanceId` see no otherapp:architect,
+        // so a second one is started on top of the live session — two agents sharing one
+        // identity, invisible to each other in the ledger and sharing one mailbox. Worse,
+        // any spawn in that window fires SessionStateChanged -> SessionState.Save, which
+        // overwrites state.json with the half-empty roster and destroys the very record
+        // recovery was about to read. Recover first; then it is safe to act.
         var recovered = SessionState.Recover(stateFile, manager, ipcManager, ConsoleUI.Log);
         if (recovered > 0)
             ConsoleUI.Log($"Recovered {recovered} session(s) from previous run.");
+        manager.RecoveryComplete = true;
+
+        // Start the orchestrator only after repo definitions are registered AND recovery
+        // has run. Its startup inbox scan can process commands that resolve against the
+        // repo registry (start-session, repo-scoped broadcast); starting it earlier made
+        // those nack with "unknown repo" for stale inbox files.
+        orchestrator?.Start();
 
         // Now that the live set is known, sweep claims stranded by dead/untracked instances
         // (this is what makes "bounce huddle to reap dead-session claims" actually true).
@@ -332,9 +440,16 @@ class Program
 
         // Git activity monitor: surface pushes/fetches (remote-tracking reflog) and
         // credential-prompt requests (auth drop dir) in the console. Poll-based.
+        // Retention (gitActivityLog) makes both signals durable in git-activity.jsonl so
+        // `stats` can answer for past days: the credential drop is the one exact who-signal
+        // huddle has and was previously deleted on sight, and movements were console-only.
         var gitAuthDir = ipcManager?.GitAuthDir ?? Path.Combine(dataDir, "gitauth");
+        var activityLog = config.Settings.Bool("gitActivityLog")
+            ? new GitActivityLog(Path.Combine(dataDir, "git-activity.jsonl"))
+            : null;
         var gitActivity = new GitActivityMonitor(
-            config.Sessions.Select(s => (s.Name, s.Root)), gitAuthDir, ConsoleUI.Log);
+            config.Sessions.Select(s => (s.Name, s.Root)), gitAuthDir, ConsoleUI.Log,
+            activityLog, TimeSpan.FromSeconds(config.Settings.Int("gitPollSeconds")));
         gitActivity.Start();
 
         // Print initial status
@@ -415,7 +530,9 @@ class Program
 
             manager.Poll(); // Check for any unreported exits
 
-            var result = ui.HandleCommand(line);
+            // Never bare: a handler that throws must cost the operator a command, not the
+            // console and the fleet attached to it (S2).
+            var result = CommandGuard.Run(() => ui.HandleCommand(line), ConsoleUI.Log);
             if (result == CommandResult.Shutdown)
             {
                 if (ConfirmShutdown())
@@ -466,9 +583,7 @@ class Program
     private static int RunProjectsHtml(string[] args)
     {
         var outPath = Path.GetFullPath(args[1]);
-        var configPath = "huddle.json";
-        for (int i = 2; i < args.Length - 1; i++)
-            if (args[i] is "--config" or "-c") { configPath = args[i + 1]; break; }
+        var configPath = ConfigPathResolver.Resolve(args);   // shared scan (S6)
 
         HuddleConfig config;
         try { config = HuddleConfig.Load(configPath); }

@@ -41,8 +41,8 @@ public static class LedgerCli
     /// Release files from the calling session's own claims. Returns the count released.
     /// Another session's claim on the same file is untouched.
     /// </summary>
-    public static int Release(WorkLedgerClaims claims, string sessionId, IEnumerable<string> files)
-        => claims.Release(sessionId, files);
+    public static int Release(WorkLedgerClaims claims, string sessionId, IEnumerable<string> files, string? ownerGuid = null)
+        => claims.Release(sessionId, files, ownerGuid);
 
     /// <summary>
     /// Render the ledger as one line per claimed file: what is claimed, by whom, since when.

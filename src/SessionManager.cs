@@ -150,12 +150,23 @@ exit 0
         {
             new { matcher = "", hooks = new[] { new { type = "command", command } } }
         };
+        // The claim guard: every Edit/Write in a registered repo must be covered by a
+        // claim this session holds, or the tool is refused with the claim command to run.
+        // Enforcement, not prose (I015 / 2026-08-22 netlib collision). The guard fails
+        // OPEN on its own errors, and never gates ipc/, logs/, .claude/, hooks/.
+        var huddleExe = Environment.ProcessPath ?? "huddle";
+        var guardEntry = new[]
+        {
+            new { matcher = "Edit|Write|MultiEdit|NotebookEdit",
+                  hooks = new[] { new { type = "command", command = $"\"{huddleExe}\" --claim-check" } } }
+        };
         var settings = new
         {
             hooks = new Dictionary<string, object>
             {
                 ["Stop"] = hookEntry,
                 ["UserPromptSubmit"] = hookEntry,
+                ["PreToolUse"] = guardEntry,
             }
         };
         File.WriteAllText(settingsFile,
@@ -310,6 +321,15 @@ exit 0
             parts.Add($"Work ledger directory: {Ipc.WorkLedgerDir}\nWrite your claim file here as <your-safe-name>.md when starting work. Read other files here to check for conflicts.");
         }
 
+        // §5.7: what this session owes, rendered FRESH at every spawn and resume. A
+        // notification is a moment and can be missed; a standing fact is present every
+        // time the session looks. The two features dropped on 2026-08-21 could not have
+        // survived a day of being told this at every wake.
+        var owed = Obligations.ContextSection(
+            Obligations.For(instance.InstanceId, _config.Sessions.Select(s => (s.Name, s.Root)), DateTimeOffset.Now),
+            DateTimeOffset.Now);
+        if (owed.Length > 0) parts.Add(owed);
+
         // Scratchpad
         var scratchpadPath = GetScratchpadPath(instance);
         parts.Add($"Scratchpad: {scratchpadPath}\nWrite checkpoint notes here as you work — decisions made, things found, issues hit, state of progress. Include the git commit hash with each checkpoint.");
@@ -415,6 +435,48 @@ exit 0
         }
     }
 
+    /// <summary>
+    /// False until <see cref="SessionState.Recover"/> has run. While false the roster is
+    /// KNOWN INCOMPLETE — sessions that survived a reload are alive but not yet re-adopted
+    /// — so nothing may persist it and nothing may conclude from its absences.
+    /// </summary>
+    public bool RecoveryComplete { get; set; }
+
+    /// <summary>Absolute path to state.json; set by the host so spawn guards can consult
+    /// the on-disk roster rather than trusting only what is in memory.</summary>
+    public string? StateFile { get; set; }
+
+    /// <summary>
+    /// A session with this identity is ALIVE on disk but absent from the in-memory roster.
+    /// That combination is what produced two `otherapp:architect` sessions on 2026-08-23:
+    /// a reload left the roster empty, `startIfNeeded` saw no such instance, and a twin was
+    /// started over a working session — same id, so the ledger saw one holder and the two
+    /// shared a mailbox. Identity is verified the same way recovery verifies it (I009:
+    /// Windows recycles PIDs), so a stale entry can never block a legitimate start.
+    /// </summary>
+    public bool IsLiveButUntracked(string instanceId, out int pid)
+    {
+        pid = 0;
+        if (string.IsNullOrEmpty(StateFile) || !File.Exists(StateFile)) return false;
+        if (_instances.TryGetValue(instanceId, out var tracked) && tracked.IsAlive) return false;
+        try
+        {
+            var entries = JsonSerializer.Deserialize<List<SessionStateEntry>>(File.ReadAllText(StateFile)) ?? [];
+            foreach (var e in entries)
+            {
+                if (!string.Equals(e.InstanceId, instanceId, StringComparison.OrdinalIgnoreCase)) continue;
+                if (e.Status != "live") continue;
+                using var proc = System.Diagnostics.Process.GetProcessById(e.Pid);
+                if (proc.HasExited) continue;
+                if (!SessionState.IdentityMatches(e, proc.StartTime, proc.ProcessName)) continue;
+                pid = e.Pid;
+                return true;
+            }
+        }
+        catch { /* unreadable / dead PID / identity unavailable: never block a start */ }
+        return false;
+    }
+
     public bool Start(string repoName, string? persona = null, bool continueSession = false, string? prompt = null, string? project = null)
     {
         repoName = ResolveRepoName(repoName);
@@ -431,6 +493,18 @@ exit 0
         }
 
         var instanceId = GenerateInstanceId(repoName, persona);
+
+        // Refuse to start a twin. GenerateInstanceId only knows the in-memory roster, so
+        // after a reload it will happily hand back an id whose session is still running.
+        // Two agents on one `repo:persona` are invisible to each other in the claims ledger
+        // and share one mailbox — the 2026-07-16 duplicate-work failure, recreated.
+        if (IsLiveButUntracked(instanceId, out var livePid))
+        {
+            _log($"REFUSED to start '{instanceId}': a live session with that identity is already running (PID {livePid}) " +
+                 "but is not in this huddle's roster — most likely it survived a reload. Nothing was started. " +
+                 "Use `recover` to re-adopt it, or `resume` to reopen it; mail it rather than starting a second one.");
+            return false;
+        }
 
         // Reuse or create instance
         SessionInstance instance;
@@ -735,7 +809,7 @@ exit 0
     /// <item>ledger location + identity: <c>HUDDLE_CLAIMS</c> (absolute — the agent's cwd is
     /// its repo, not huddle's), <c>HUDDLE_INSTANCE</c>, <c>HUDDLE_REPO</c>, <c>HUDDLE_GUID</c>;</item>
     /// <item><c>HUDDLE_REPO_ROOT</c>, the session's ACTUAL checkout directory. A repo NAME
-    /// cannot name a git worktree — `lib-feature` is a worktree of `lib`, not a registered
+    /// cannot name a git worktree — `LIB-FEATURE` is a worktree of `LIB`, not a registered
     /// repo — so a session working in one had no way to say where it was, and its claims
     /// resolved to the wrong checkout for every reader (ISSUES.md I014). The root is recorded
     /// on the claim itself; the name stays for display and for the fallback.</item>
@@ -880,7 +954,7 @@ exit 0
         // Stop the process outside the lock. The session is only marked Stopped
         // when the process has VERIFIABLY exited — a stop that fails to kill must
         // not report success, or the agent keeps working untracked and unclaimed
-        // while huddle believes it's gone (2026-07-16 incident).
+        // while huddle believes it's gone (2026-07-16 incident, ISSUES.md I007).
         var exited = false;
         if (proc != null)
         {

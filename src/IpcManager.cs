@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -49,6 +49,67 @@ public class IpcMessage
             }
             return Body;
         }
+    }
+}
+
+/// <summary>
+/// Mail delivery appends a wake line to the recipient's pending.txt, which its Stop /
+/// UserPromptSubmit hooks drain — but those fire on a TURN BOUNDARY, and an idle session
+/// ends no turn and submits nothing. Mail to an idle agent was therefore a dead letter
+/// until a human typed into that console (2026-08-22: two fix tasks sat 27 minutes with
+/// both recipients idle; the operator injected by hand). This decides when huddle nudges
+/// the console itself, so the hook has a submit to fold the pending context onto.
+/// </summary>
+public static class MailWake
+{
+    /// <summary>Deliberately content-free: the pending line the hook folds in carries the
+    /// sender, subject and path. This is only the submit that makes the hook fire.</summary>
+    public const string WakeLine = "[huddle] you have mail";
+
+    /// <summary>Short enough that a session mid-thought is nudged promptly, long enough
+    /// that an agent between tool calls is not mistaken for an idle one.</summary>
+    public static readonly TimeSpan IdleAfter = TimeSpan.FromSeconds(20);
+
+    /// <summary>~/.claude/projects — where Claude Code keeps session transcripts.</summary>
+    public static string ProjectsRoot => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "projects");
+
+    /// <summary>
+    /// Pure form. Unknown activity counts as idle: a session with no transcript yet has
+    /// certainly not drained anything, and a spurious nudge costs one line whereas a
+    /// missed one costs the obligation.
+    /// </summary>
+    public static bool ShouldWake(DateTime? lastActivity, DateTime now, TimeSpan idleAfter) =>
+        lastActivity is null || now - lastActivity.Value >= idleAfter;
+
+    /// <summary>
+    /// The clock pairing, in one place because getting it wrong is silent.
+    /// <see cref="SessionTrouble.LastActivity"/> returns the transcript mtime in LOCAL
+    /// time; comparing it against <c>UtcNow</c> yields a negative age on any UTC+n
+    /// machine, so nothing ever reads as idle and the wake never fires. Both halves live
+    /// here so a test can exercise the pair rather than the arithmetic alone.
+    /// </summary>
+    public static bool ShouldWakeSession(string? transcriptPath, TimeSpan idleAfter)
+    {
+        var last = transcriptPath is { Length: > 0 } && File.Exists(transcriptPath)
+            ? SessionTrouble.LastActivity(transcriptPath)
+            : null;
+        return ShouldWake(last, DateTime.Now, idleAfter);
+    }
+
+    /// <summary>True when a session has queued context worth waking it for. The retry
+    /// tick walks every watched session, so this keeps it from injecting into consoles
+    /// with an empty queue.</summary>
+    public static bool HasPending(string pendingPath)
+    {
+        try
+        {
+            if (!File.Exists(pendingPath)) return false;
+            foreach (var line in File.ReadLines(pendingPath))
+                if (!string.IsNullOrWhiteSpace(line)) return true;
+            return false;
+        }
+        catch { return false; }
     }
 }
 
@@ -104,6 +165,26 @@ public class IpcManager : IDisposable
     /// doesn't re-fire the same mail. The file is NOT moved either way.
     /// </summary>
     public event Func<string /*instanceId*/, IpcMessage, string /*filePath*/, bool>? MessageReceived;
+
+    /// <summary>
+    /// Nudge an idle session so its hook drains pending.txt. Set by the host (Program),
+    /// which owns process handles and transcript paths — IpcManager stays free of both.
+    /// Returns true when a wake was actually injected. Called from the retry tick for
+    /// sessions that still have queued context: <see cref="MessageReceived"/> fires once
+    /// per mail file and never again, so a session that idles AFTER delivery, or whose
+    /// wake was held because the operator was typing, has no other route back.
+    /// </summary>
+    public Func<string /*safePathName*/, bool>? WakeIdle;
+
+    /// <summary>
+    /// Mail that has just LEFT a session's inbox — the agent moved it to processed/, or
+    /// huddle cleared an original whose processed/ copy appeared. Moving mail out of the
+    /// inbox already means "I have read this", so spec §5.4 reuses it as the
+    /// acknowledgement signal rather than inventing a second one. Set by the host
+    /// (Program), which knows which repo's ledger to append to; IpcManager knows only
+    /// that a file moved. File NAMES, not paths — the host makes them relative.
+    /// </summary>
+    public Action<string /*safePathName*/, IReadOnlyList<string> /*mailFileNames*/>? MailAcknowledged;
 
     public string IpcDir => _ipcDir;
     public string WorkLedgerDir => Path.Combine(_ipcDir, "workledger");
@@ -326,6 +407,16 @@ public class IpcManager : IDisposable
                     }
                     catch { /* file may have been moved mid-scan; ignore */ }
                 }
+
+                // Queued context that nothing is going to drain. Announced mail never
+                // re-enters ProcessInboxFile, so this is the only path that reaches a
+                // session which idled after delivery or whose wake was held.
+                try
+                {
+                    if (WakeIdle is { } wake && MailWake.HasPending(PendingPath(kv.Key)))
+                        wake(kv.Key);
+                }
+                catch { /* a wake is best-effort; never let it kill the tick */ }
             }
         }
         catch (Exception ex) { _log($"IPC: retry tick failed: {ex.Message}"); }
@@ -623,6 +714,17 @@ public class IpcManager : IDisposable
             }
             if (reap.Count > 0)
                 _log($"IPC: {reap.Count} message(s) acknowledged by '{safe}' — cleared from inbox");
+
+            // Mail leaving the inbox is acknowledgement (§5.4). `reap` and `forget`
+            // together are exactly what left it since the last pass, so this fires once
+            // per message in the normal case; a file can appear in reap on one tick and
+            // forget on the next, so the handler is required to be idempotent anyway.
+            var acknowledged = reap.Concat(forget).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (acknowledged.Count > 0 && MailAcknowledged is { } ack)
+            {
+                try { ack(safe, acknowledged); }
+                catch (Exception ex) { _log($"IPC: ledger acknowledgement for '{safe}' failed: {ex.Message}"); }
+            }
 
             if (forget.Count > 0) ForgetAnnounced(safe, forget);
         }

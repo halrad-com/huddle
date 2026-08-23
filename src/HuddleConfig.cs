@@ -66,6 +66,15 @@ public class GroupMember
     public string? Prompt { get; set; }
 }
 
+// The nine settable properties below (contextFile, ipc, crashLogRetention,
+// rescanIntervalSeconds, reclaimResourcesOnStop, seedPermissions, autoRestart,
+// maxAutoRestarts, backoffSeconds) are the LEGACY TOP-LEVEL TIER. They exist so an older
+// huddle.json keeps working, and they are read in exactly one place: LegacyTopLevelValues,
+// which feeds them to SettingsResolver as the fallback below the "settings" block.
+//
+// Do not read them anywhere else. Runtime behaviour comes from config.Settings, or the
+// "settings" block is silently ignored and every surface reports a value the code is not
+// using (S1, review 2026-08-22).
 public class HuddleConfig
 {
     [JsonPropertyName("sessions")]
@@ -128,17 +137,72 @@ public class HuddleConfig
     [JsonPropertyName("groups")]
     public Dictionary<string, List<GroupMember>>? Groups { get; set; }
 
+    /// <summary>Raw "settings" block; validated by SettingsLoader in Load. Never read
+    /// directly — use <see cref="Settings"/>.</summary>
+    [JsonPropertyName("settings")]
+    public JsonElement? SettingsRaw { get; set; }
+
+    [JsonIgnore]
+    public ResolvedSettings Settings { get; private set; } = ResolvedSettings.Defaults();
+
+    /// <summary>The nine pre-settings top-level keys, as strings, ONLY when the JSON
+    /// actually carried them. Used as the legacy fallback tier.</summary>
+    public Dictionary<string, string> LegacyTopLevelValues(JsonElement root)
+    {
+        var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var def in SettingsCatalog.All)
+        {
+            if (!root.TryGetProperty(def.Key, out var el)) continue;
+            string? v = el.ValueKind switch
+            {
+                JsonValueKind.True => "true",
+                JsonValueKind.False => "false",
+                JsonValueKind.Number => el.GetRawText(),
+                JsonValueKind.String => el.GetString(),
+                JsonValueKind.Array when def.Key == "backoffSeconds" =>
+                    string.Join(",", el.EnumerateArray().Select(x => x.GetRawText())),
+                _ => null
+            };
+            if (v != null) d[def.Key] = v;
+        }
+        return d;
+    }
+
     /// <summary>
-    /// Resolve effective auto-restart config for a session (session overrides ?? global defaults).
+    /// Resolve effective auto-restart config for a session (session overrides ?? global
+    /// defaults). The global tier comes from <see cref="Settings"/>, never from the legacy
+    /// POCO properties: those are the resolver's fallback INPUT, and reading them here
+    /// would silently ignore the "settings" block (S1). Per-session overrides still win —
+    /// they are out of scope for settings by design (spec section 10).
     /// </summary>
     public (bool Enabled, int Max, int[] Backoff) GetAutoRestartConfig(SessionDefinition session)
     {
-        var enabled = session.AutoRestart ?? AutoRestart;
-        var max = session.MaxAutoRestarts ?? MaxAutoRestarts;
-        var backoff = session.BackoffSeconds ?? BackoffSeconds;
+        var enabled = session.AutoRestart ?? Settings.Bool("autoRestart");
+        var max = session.MaxAutoRestarts ?? Settings.Int("maxAutoRestarts");
+        var backoff = session.BackoffSeconds ?? Settings.IntList("backoffSeconds");
         if (backoff.Length == 0) backoff = [2];
         return (enabled, max, backoff);
     }
+
+    /// <summary>
+    /// One option set for every read of a huddle.json, used by the deserializer here and
+    /// mirrored by <see cref="JsonDocumentOptions"/> in <see cref="ReadOptions"/> and in
+    /// SettingsWriter. Comments and trailing commas are ACCEPTED — the writer already
+    /// tolerated them, and a loader stricter than the writer means `--set` can rewrite a
+    /// file the loader then refuses with a raw JsonException (S4).
+    /// </summary>
+    public static readonly JsonSerializerOptions ParseOptions = new()
+    {
+        ReadCommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true
+    };
+
+    /// <summary>The <see cref="ParseOptions"/> rules, for the raw-document readers.</summary>
+    public static readonly JsonDocumentOptions ReadOptions = new()
+    {
+        CommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true
+    };
 
     public static HuddleConfig Load(string path)
     {
@@ -146,8 +210,15 @@ public class HuddleConfig
             throw new FileNotFoundException($"Config not found: {path}");
 
         var json = File.ReadAllText(path);
-        return JsonSerializer.Deserialize<HuddleConfig>(json)
+        var cfg = JsonSerializer.Deserialize<HuddleConfig>(json, ParseOptions)
             ?? throw new InvalidOperationException("Failed to parse config");
+
+        using var doc = JsonDocument.Parse(json, ReadOptions);
+        var label = Path.GetFileName(path);
+        var loaded = SettingsLoader.Load(cfg.SettingsRaw, label);
+        if (loaded.Errors.Count > 0) throw new SettingsException(loaded.Errors);
+        cfg.Settings = SettingsResolver.Resolve(loaded.Values, cfg.LegacyTopLevelValues(doc.RootElement));
+        return cfg;
     }
 
     public string ResolveClaudePath()

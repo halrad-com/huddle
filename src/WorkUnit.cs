@@ -16,4 +16,8 @@ public record WorkUnit(
     IReadOnlyList<string> DependsOn,
     string? Objective = null,
     string? Owner = null,
-    string? Project = null);   // project slug (projects phase 1); null when unstamped
+    string? Project = null,    // project slug (projects phase 1); null when unstamped
+    // Optional feature-ledger parent (`D-014`, `otherapp:F-001`). Project is a SLUG, not a
+    // ledger id, so nothing is inferred from it: a unit with no Ledger becomes an orphan
+    // task, which is the honest reading of work nobody ideated.
+    string? Ledger = null);

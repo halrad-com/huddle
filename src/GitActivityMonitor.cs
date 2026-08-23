@@ -40,7 +40,12 @@ public sealed class GitActivityMonitor : IDisposable
 
     private System.Threading.Timer? _timer;
     private int _running; // 0/1 re-entrancy guard for the timer callback
-    private static readonly TimeSpan Interval = TimeSpan.FromSeconds(5);
+    private readonly TimeSpan _interval;
+
+    // Durable record of what this monitor observes. Null = retention off
+    // (gitActivityLog), in which case behaviour is exactly as it was before: the
+    // console line is the only trace and the drop file is still deleted.
+    private readonly GitActivityLog? _activity;
 
     // Reflog file path -> byte length last seen. A file present at Start() is
     // seeded to its current length so huddle startup never replays history (and a
@@ -54,11 +59,19 @@ public sealed class GitActivityMonitor : IDisposable
     // A null value means "already tried and this root is not a resolvable repo".
     private readonly Dictionary<string, string?> _commonDirs = new();
 
-    public GitActivityMonitor(IEnumerable<(string Name, string Root)> repos, string authDropDir, Action<string> log)
+    // Repo root -> (remote name -> stable identity), cached. `git remote -v` is a
+    // process spawn; the remote set of a checkout does not change under us often
+    // enough to pay for it on every 5s tick.
+    private readonly Dictionary<string, IReadOnlyDictionary<string, string>> _remoteIds = new();
+
+    public GitActivityMonitor(IEnumerable<(string Name, string Root)> repos, string authDropDir, Action<string> log,
+        GitActivityLog? activityLog = null, TimeSpan? interval = null)
     {
         _repos = repos.ToList();
         _authDropDir = authDropDir;
         _log = log;
+        _activity = activityLog;
+        _interval = interval ?? TimeSpan.FromSeconds(5);
     }
 
     public void Start()
@@ -67,7 +80,7 @@ public sealed class GitActivityMonitor : IDisposable
         // Seed reflog offsets to current lengths so we only report transfers from
         // now on, not the whole recorded history.
         try { SeedReflogs(); } catch (Exception ex) { _log($"git-activity: seed failed: {ex.Message}"); }
-        _timer = new System.Threading.Timer(Tick, null, Interval, Interval);
+        _timer = new System.Threading.Timer(Tick, null, _interval, _interval);
     }
 
     private void Tick(object? state)
@@ -96,6 +109,10 @@ public sealed class GitActivityMonitor : IDisposable
             catch { continue; } // writer may still hold it; retry next tick
             var line = FormatAuthLine(text);
             if (line != null) ConsoleUI.LogGit(line, attention: true);
+            // Retain before deleting: this drop is the one signal that names an
+            // instance, and it is about to be thrown away.
+            var entry = GitActivityLog.ParseAuthDrop(text, DateTimeOffset.Now);
+            if (entry != null) _activity?.Append(entry);
             try { File.Delete(file); } catch { /* re-emits next tick if it lingers */ }
         }
     }
@@ -155,10 +172,20 @@ public sealed class GitActivityMonitor : IDisposable
                 catch { _reflogOffsets[file] = len; continue; }
 
                 var reference = RefFromLogPath(remotesDir, file);
+                var (remoteName, _) = SplitReference(reference);
+                if (!_remoteIds.TryGetValue(root, out var ids))
+                {
+                    ids = RemoteIdentity.ForRepo(root);
+                    _remoteIds[root] = ids;
+                }
+                ids.TryGetValue(remoteName, out var identity);
+
                 foreach (var rawLine in added.Split('\n'))
                 {
-                    var msg = FormatMovementLine(name, reference, rawLine);
+                    var msg = FormatMovementLine(name, reference, rawLine, identity);
                     if (msg != null) ConsoleUI.LogGit(msg);
+                    var entry = GitActivityLog.ParseMovement(name, reference, rawLine, identity);
+                    if (entry != null) _activity?.Append(entry);
                 }
                 _reflogOffsets[file] = len;
             }
@@ -215,7 +242,13 @@ public sealed class GitActivityMonitor : IDisposable
     /// where message is "update by push", "fetch", "pull" (possibly with a suffix).
     /// Pure — unit-tested.
     /// </summary>
-    public static string? FormatMovementLine(string repoName, string reference, string rawLine)
+    /// <param name="identity">
+    /// The remote's stable identity from <see cref="RemoteIdentity"/> ("dev.azure.com/contoso/LIB").
+    /// When known the line names it instead of the local remote name, because every repo has an
+    /// `origin` and myapp carries a second remote a push must never reach — "origin/master"
+    /// identifies nothing. Null falls back to today's exact format so nothing regresses.
+    /// </param>
+    public static string? FormatMovementLine(string repoName, string reference, string rawLine, string? identity = null)
     {
         if (string.IsNullOrWhiteSpace(rawLine)) return null;
         var tab = rawLine.IndexOf('\t');
@@ -235,7 +268,17 @@ public sealed class GitActivityMonitor : IDisposable
         else if (lower.Contains("pull")) verb = "pulled into";
         else verb = "updated";
 
-        return $"[git] {repoName} {verb} {reference} ({shortSha})";
+        if (identity is null) return $"[git] {repoName} {verb} {reference} ({shortSha})";
+        var (_, branch) = SplitReference(reference);
+        return $"[git] {repoName} {verb} {identity} ({branch} {shortSha})";
+    }
+
+    /// <summary>"origin/master" → ("origin","master"); "origin/feat/x" → ("origin","feat/x").
+    /// A reference with no slash is all remote and no branch. Pure — unit-tested.</summary>
+    public static (string Remote, string Branch) SplitReference(string reference)
+    {
+        var i = reference.IndexOf('/');
+        return i < 0 ? (reference, "") : (reference[..i], reference[(i + 1)..]);
     }
 
     public void Dispose()

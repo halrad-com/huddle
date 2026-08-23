@@ -39,6 +39,7 @@ public static class Verbs
         new("projects",  "projects [html [path]]   List projects; 'html' writes the status page"),
         new("project",   "project <slug>           Show a project's detail"),
         new("handoffs",  "handoffs [@repo] [n]     Recent agent-to-agent handoffs"),
+        new("stats",     "stats [<repo>] [--who] [--since 30d] [html]   Repo activity: movement, commits, who, time, work"),
         new("personas",  "personas                 List available personas"),
         new("repos",     "repos                    List registered repos"),
         new("send",      "send <instance> <msg>    Queue mail into a session's inbox"),
@@ -55,6 +56,8 @@ public static class Verbs
         new("progress",  "progress                 Session progress + ledger summary"),
         new("conflicts", "conflicts                Show claim conflicts"),
         new("queue",     "queue                    Show the work queue"),
+        new("settings",  "settings [key [value]]   Show or set huddle.json settings"),
+        new("ledger",    "ledger [all|<id>|open [--by-age]|orphans|accept <id>|drop <id> <why>|decline <id> [note]] [--repo <name>] [--owner <instance>]   The feature ledger"),
         new("replay",    "replay <repo> [host[:port]]   Replay capture suites"),
         new("docs",      "docs [plans|churn] [@repo] [kw] [-Nw]   List doc artifacts"),
         new("open",      "open <n>                 Open a listed doc/result"),
@@ -178,6 +181,7 @@ public sealed class ArgCompleter : ICompleter
         ("start", 0) => _p.Repos(),
         ("start", 1) => _p.Personas(),
         ("replay" or "shell", 0) => _p.Repos(),
+        ("stats", 0) => _p.Repos(),
         _ => Array.Empty<string>(),
     };
 

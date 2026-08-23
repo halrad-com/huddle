@@ -45,6 +45,10 @@ public class ConsoleUI
     public IpcManager? Ipc { get; set; }
     public Orchestrator? Orchestrator { get; set; }
 
+    /// <summary>The huddle.json this instance was started with — what `settings` reads,
+    /// writes and what `reload` re-validates. Set by Program.cs from its resolved path.</summary>
+    public string ConfigPath { get; init; } = "huddle.json";
+
     private IDocumentSource? _docSource;
     private readonly IDocumentOpener _docOpener = new ShellDocumentOpener();
     private List<DocumentEntry> _lastDocs = new();
@@ -76,6 +80,11 @@ public class ConsoleUI
         Console.WriteLine("Claude Code session orchestrator");
         Console.WriteLine();
     }
+
+    /// <summary>Every registered repo as (name, root) — a session can owe work in a repo
+    /// that is not its own, so obligations are read across all of them.</summary>
+    private IEnumerable<(string Name, string Root)> RepoPairs() =>
+        _manager.Config.Sessions.Select(s => (s.Name, s.Root));
 
     public void PrintStatus()
     {
@@ -150,6 +159,17 @@ public class ConsoleUI
                         Console.Write($"  [{instance.ActivePersona}]");
                     }
 
+                    // §5.6: a session cannot look clean while it owes work. The audited
+                    // session reported "nothing in flight, inbox clear" repeatedly while
+                    // holding four unread assignments — huddle knew and said nothing.
+                    var owed = Obligations.StatusNote(
+                        Obligations.For(instance.InstanceId, RepoPairs(), DateTimeOffset.Now), DateTimeOffset.Now);
+                    if (owed.Length > 0)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.Write($"  {owed}");
+                    }
+
                     // Project attribution + declared purpose: the operator should
                     // never have to ask a window why it exists (2026-08-09 feedback).
                     // Show what we KNOW; where a stamp was expected (the session has a
@@ -203,6 +223,23 @@ public class ConsoleUI
                 finally { Console.ResetColor(); }
             }
         }
+
+        // Two live sessions on one identity cannot see each other's mail, and until the
+        // OwnerGuid fix could not see each other's claims either (I016). The spawn guard
+        // stops new ones; this makes a pair that already exists visible here rather than
+        // through a failed edit hours later.
+        var dupes = Obligations.DuplicateIdentities(
+            _manager.Instances.Values.Where(i => i.IsAlive).Select(i => (i.InstanceId, i.Process?.Id ?? 0)));
+        foreach (var d in dupes)
+        {
+            try
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"  ** DUPLICATE IDENTITY ** {d}");
+            }
+            finally { Console.ResetColor(); }
+        }
+
         Console.WriteLine();
     }
 
@@ -234,6 +271,11 @@ public class ConsoleUI
             Console.WriteLine("  backlog                  Show undelivered/unread mail per session (alias: unread)");
             Console.WriteLine("  janitor                  Report leaked session resources (resledger, B016)");
             Console.WriteLine("  queue                    Show the work queue — active / queued (blocked on) / done / failed");
+            Console.WriteLine("  settings [key [value]]   Show or set huddle.json settings ('settings unset <key>' reverts to default)");
+            Console.WriteLine("  ledger [all|<id>|open|orphans]  The feature ledger (docs/ledger/); 'open' is every open item across repos, oldest first (--by-age is that default, spelled out)");
+            Console.WriteLine("  ledger accept <id>              Record acceptance. Refused unless delivered, and unless a Deliverable names its 'accepts' gate");
+            Console.WriteLine("  ledger drop <id> <why>          Stop a hierarchy item. The reason is required and is kept — dropped is a state, not a deletion");
+            Console.WriteLine("  ledger decline <id> [note]      Hand a task back. Cheap and recorded; started work is abandoned, not declined");
             Console.WriteLine("  replay <repo> [host[:port]]  Run the repo's captured regression tests; optional cross-box DUT target");
             Console.WriteLine("  docs [plans|churn] [@repo] [kw] [-1d/-1w]  List docs; @repo, kw=folder/title, -Nd/-Nw=time window");
             Console.WriteLine("  open <n>                 Open the nth document from the last 'docs' listing");
@@ -243,6 +285,8 @@ public class ConsoleUI
             Console.WriteLine("  projects [html [path]]   List projects; 'projects html' writes the status page (repro output demo)");
             Console.WriteLine("  project <slug>           Project detail: artifacts, sprint, live sessions, claims");
             Console.WriteLine("  handoffs [@repo] [n]     Who handed what to whom, newest first (auto-announced as they land)");
+            Console.WriteLine("  stats [<repo>] [--who] [--since 30d] [html]");
+            Console.WriteLine("                           Repo activity: movement, commits, who (exact/inferred), time, work, health");
             Console.WriteLine("  direct <english task>    Hand a task to huddle:architect to plan + dispatch automatically");
             Console.WriteLine("  quit                     Exit huddle, sessions keep running");
             Console.WriteLine("  shutdown                 Stop all sessions and exit");
@@ -416,6 +460,10 @@ public class ConsoleUI
                 HandleHandoffs(arg);
                 break;
 
+            case "stats":
+                HandleStats(arg);
+                break;
+
             case "personas" or "p":
                 PrintPersonas(_manager.GetAvailablePersonas());
                 break;
@@ -466,6 +514,14 @@ public class ConsoleUI
 
             case "queue":
                 HandleQueue();
+                break;
+
+            case "settings":
+                HandleSettings(arg);
+                break;
+
+            case "ledger":
+                HandleLedger(arg);
                 break;
 
             case "replay":
@@ -1252,6 +1308,139 @@ public class ConsoleUI
     // Set by Program: <configDir>/projects-map.json (may not exist — that's fine).
     public string? ProjectsMapPath { get; set; }
 
+    // `ledger [all|<id>|open [--by-age]|orphans] [--repo <name>] [--owner <instance>]`
+    // Read-only (spec §5.1, Phase 1): parse every configured repo's docs/ledger/,
+    // replay its events, render. Huddle writes nothing here — `accept` and `drop`
+    // are Phase 2.
+    private void HandleLedger(string arg)
+    {
+        var tokens = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        string? repoFilter = null, ownerFilter = null;
+        for (int i = 0; i < tokens.Count; i++)
+        {
+            if (tokens[i] == "--repo" && i + 1 < tokens.Count) { repoFilter = tokens[i + 1]; tokens.RemoveRange(i, 2); i--; continue; }
+            if (tokens[i] == "--owner" && i + 1 < tokens.Count) { ownerFilter = tokens[i + 1]; tokens.RemoveRange(i, 2); i--; continue; }
+        }
+        // `--by-age` is accepted and is the DEFAULT (and only) ordering for `open` —
+        // OpenByAge always sorts oldest-first. The flag exists so the operator can say
+        // it out loud; it is documented as the default rather than left as a token that
+        // silently does nothing.
+        tokens.Remove("--by-age");
+
+        var repos = _manager.Repos.Select(kv => (Name: kv.Key, kv.Value.Root)).ToList();
+        if (repoFilter != null)
+            repos = repos.Where(r => r.Name.Equals(repoFilter, StringComparison.OrdinalIgnoreCase)).ToList();
+        var snaps = repos.Select(r => LedgerView.Load(r.Name, r.Root)).ToList();
+
+        var verb = tokens.Count > 0 ? tokens[0].ToLowerInvariant() : "";
+        Console.WriteLine();
+        switch (verb)
+        {
+            case "open":
+            {
+                var items = LedgerView.OpenByAge(snaps, DateTimeOffset.Now);
+                if (ownerFilter != null)
+                    items = items.Where(i => string.Equals(i.Owner, ownerFilter, StringComparison.OrdinalIgnoreCase)).ToList();
+                Console.Write(LedgerView.RenderOpenByAge(items));
+                break;
+            }
+            case "orphans":
+                Console.Write(LedgerView.RenderOrphans(snaps));
+                break;
+            case "":
+            case "all":
+            {
+                // Which repo is "current" comes from the working directory measured against
+                // the configured roots — not from a repo literally named "huddle", which
+                // printed blank lines on any install without one (L4).
+                var current = LedgerView.CurrentSnapshots(
+                    snaps, repos.Select(r => (r.Name, r.Root)), Directory.GetCurrentDirectory(), repoFilter);
+                if (current.Count == 0) { Log(LedgerView.NoCurrentLedger); return; }
+                foreach (var s in current)
+                {
+                    Console.WriteLine($"  {s.Repo}  ({s.Dir})");
+                    var warning = LedgerView.DeclaredRepoWarning(s);
+                    if (warning != null) Console.WriteLine($"  ! {warning}");
+                    Console.Write(LedgerView.RenderTree(s, includeClosed: verb == "all"));
+                }
+                break;
+            }
+            case "accept":
+            case "drop":
+            case "decline":
+                HandleLedgerWrite(verb, tokens.Skip(1).ToList(), snaps, repos, repoFilter);
+                break;
+            default:
+            {
+                if (!LedgerId.TryParse(tokens[0], out var id))
+                {
+                    Log("usage: ledger [all | <id> | open [--by-age] | orphans | accept <id> | " +
+                        "drop <id> <why> | decline <id> [note]] [--repo <name>] [--owner <instance>]");
+                    return;
+                }
+                // Each snapshot carries its own event log, so RenderOne scopes history
+                // per repo (L2) — and we no longer re-read every events.jsonl here.
+                Console.Write(LedgerView.RenderOne(snaps, id));
+                break;
+            }
+        }
+        Console.WriteLine();
+    }
+
+    /// <summary>
+    /// The three write verbs. The RULES live in <see cref="LedgerCommandsWrite"/> and are
+    /// tested without a console; this resolves which repo's ledger is meant, appends what
+    /// the rules return, and prints the refusal verbatim when they say no.
+    ///
+    /// <para>Nothing is written on a refusal, because the rules answer with an event
+    /// rather than performing one — a rejected transition cannot leave half of itself
+    /// behind.</para>
+    /// </summary>
+    private void HandleLedgerWrite(
+        string verb, List<string> rest, List<LedgerRepoSnapshot> snaps,
+        List<(string Name, string Root)> repos, string? repoFilter)
+    {
+        if (rest.Count == 0)
+        {
+            Log($"usage: ledger {verb} <id>{(verb == "drop" ? " <why>" : verb == "decline" ? " [note]" : "")}");
+            return;
+        }
+        if (!LedgerId.TryParse(rest[0], out var id))
+        {
+            Log($"ledger {verb}: \"{rest[0]}\" is not an id (expect E-/S-/U-/F-/D-/T- and a number)");
+            return;
+        }
+        var note = string.Join(' ', rest.Skip(1)).Trim();
+
+        // A qualified id names its own repo; otherwise the same scoping every read verb
+        // uses — the explicit --repo, else the repo the working directory is in.
+        var candidates = id.Repo is { } r
+            ? snaps.Where(s => s.Repo.Equals(r, StringComparison.OrdinalIgnoreCase)).ToList()
+            : LedgerView.CurrentSnapshots(snaps, repos, Directory.GetCurrentDirectory(), repoFilter).ToList();
+
+        if (candidates.Count == 0) { Log(LedgerView.NoCurrentLedger); return; }
+
+        var snap = candidates[0];
+        var actor = "operator";
+        var now = DateTimeOffset.UtcNow;
+
+        LedgerEvent? ev;
+        string why;
+        var ok = verb switch
+        {
+            "accept" => LedgerCommandsWrite.TryAccept(snap, id, actor, now, out ev, out why),
+            "drop" => LedgerCommandsWrite.TryDrop(snap, id, note, actor, now, out ev, out why),
+            _ => LedgerCommandsWrite.TryDecline(snap, id, note, actor, now, out ev, out why),
+        };
+        if (!ok || ev is null) { Log($"ledger {verb}: {why}"); return; }
+
+        var writer = new LedgerWriter(snap.Dir, Log);
+        writer.Append(ev);
+        Log($"ledger: {snap.Repo}:{ev.Id} {ev.To ?? ev.Event.Replace("task-", "")}" +
+            $"{(ev.Note is { Length: > 0 } n ? $" — {n}" : "")}" +
+            $"{(ev.Ungated ? "  (ungated — no parent deliverable to gate against)" : "")}");
+    }
+
     private List<ProjectInfo> DiscoverProjects()
     {
         string? mapJson = null;
@@ -1313,6 +1502,89 @@ public class ConsoleUI
         var dir = Ipc?.ClaimsDir;
         if (dir == null || !Directory.Exists(dir)) return new();
         return new WorkLedgerClaims(dir, Log).ReadAll().ToList();
+    }
+
+    /// <summary>
+    /// `stats [&lt;repo&gt;] [--who] [--since 30d|12h] [html]` — what moved where, who touched
+    /// it, how much, and when, for every configured repo.
+    ///
+    /// Everything comes from corpora huddle already holds (remote-tracking reflogs, git log,
+    /// the session roster, claims, the queue, mail, handoffs, logs/git-activity.jsonl), so
+    /// the verb answers for the past week the day it ships rather than only from now on.
+    /// Nothing here touches the network: local clones are the source.
+    /// </summary>
+    private void HandleStats(string arg)
+    {
+        var tokens = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        var now = DateTimeOffset.Now;
+        var since = now.AddDays(-_manager.Config.Settings.Int("statsSinceDays"));
+        bool who = false, html = false; string? repoFilter = null;
+        for (int i = 0; i < tokens.Count; i++)
+        {
+            if (tokens[i] == "--who") { who = true; continue; }
+            if (tokens[i] == "html") { html = true; continue; }
+            if (tokens[i] == "--since" && i + 1 < tokens.Count)
+            {
+                if (!StatsView.TryParseSince(tokens[++i], now, out since)) { Log("stats: --since takes 30d or 12h"); return; }
+                continue;
+            }
+            repoFilter = tokens[i];
+        }
+
+        var stateFile = StateFile ?? Path.Combine("logs", "state.json");
+        var logsDir = Path.GetDirectoryName(stateFile) ?? "logs";
+        var roster = SessionState.LoadEntries(stateFile).Select(RosterWindow.From).ToList();
+        var activity = new GitActivityLog(Path.Combine(logsDir, "git-activity.jsonl")).ReadSince(since);
+        var claims = ReadActiveClaims();
+        var units = Orchestrator?.Queue.All().Select(x => x.unit).ToList() ?? new List<WorkUnit>();
+        var handoffs = new HandoffLedger(Path.Combine(logsDir, "handoffs.jsonl")).ReadAll();
+
+        // Mail volume per repo: every mailbox whose safe-name starts "<repo>_", counted by
+        // file mtime so --since bounds this corpus too rather than reporting all history.
+        int MailFor(string repo)
+        {
+            var prefix = repo.Replace(':', '_') + "_";
+            var ipc = Ipc?.IpcDir ?? "ipc";
+            if (!Directory.Exists(ipc)) return 0;
+            return Directory.GetDirectories(ipc).Where(d => Path.GetFileName(d).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .Sum(d => new[] { "inbox", "processed" }.Sum(sub => Directory.Exists(Path.Combine(d, sub))
+                    ? Directory.GetFiles(Path.Combine(d, sub)).Count(f => File.GetLastWriteTime(f) >= since.LocalDateTime) : 0));
+        }
+        var src = new StatsSources(roster, activity, claims, units, MailFor, handoffs);
+
+        var repos = _manager.Config.Sessions.Where(s => repoFilter == null || s.Name.Equals(repoFilter, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (repos.Count == 0) { Log($"stats: no repo '{repoFilter}'"); return; }
+        var snaps = repos.Select(r => RepoStatsCollector.Collect(r.Name, r.Root, since, now, src)).ToList();
+
+        if (html) { HandleStatsHtml(snaps, since, now); return; }
+        Console.WriteLine();
+        Console.Write(who ? StatsView.RenderWho(snaps) : StatsView.RenderAll(snaps, since, now));
+        Console.WriteLine();
+    }
+
+    private void HandleStatsHtml(IReadOnlyList<RepoStatsSnapshot> snaps, DateTimeOffset since, DateTimeOffset now)
+    {
+        // The heatmap is a YEAR of commits regardless of --since: a 7-day window would
+        // render 51 empty columns and say nothing. Only the graph is widened — every
+        // other figure on the page stays inside the window the operator asked for.
+        var wide = snaps.Select(s =>
+        {
+            if (s.Commits == null) return s;
+            return s with { Commits = s.Commits with { CommitTimes = GitLogStats.CommitTimesSince(s.Root, now.AddDays(-364)) } };
+        }).ToList();
+
+        var outPath = Path.Combine(Path.GetDirectoryName(StateFile ?? ".") ?? ".", "stats.html");
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+            File.WriteAllText(outPath, StatsView.RenderHtml(wide, since, now, $"huddle {BuildInfo.Short}"));
+            Log($"stats: wrote {wide.Count} repo(s) -> {Hyperlink(outPath, outPath)}");
+            Log($"  open it: shell {outPath}");
+        }
+        catch (Exception ex)
+        {
+            Log($"stats: html write failed — {ex.Message}");
+        }
     }
 
     private void HandleProjects(string arg)
@@ -1996,8 +2268,81 @@ public class ConsoleUI
     // disposed, child claude sessions left running). ARIA-style exit/wait/build/restart —
     // the build happens during the wait, after the publish lock releases. Confirmed first
     // because it tears down the orchestrator. Returns true if the caller should now quit.
+    // `settings` / `settings <key>` / `settings <key> <value>` / `settings unset <key>`.
+    // Reads resolve from the config loaded at startup; writes go straight to huddle.json
+    // through the same validated write-back the CLI uses, so the two cannot disagree
+    // about what is legal.
+    private void HandleSettings(string arg)
+    {
+        // Split ONCE: the first token is the key (or `unset`), and EVERYTHING after it is
+        // the value, spaces included. Splitting into three dropped the tail, so
+        // `settings backoffSeconds 2, 5, 15` silently wrote "2," (S5).
+        var parts = arg.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0)
+        {
+            foreach (var line in SettingsCli.Render(_manager.Config.Settings, ConfigPath).Split('\n'))
+                Console.WriteLine(line.TrimEnd('\r'));
+            return;
+        }
+
+        var head = parts[0];
+        var rest = parts.Length > 1 ? parts[1].Trim() : "";
+
+        if (head.Equals("unset", StringComparison.OrdinalIgnoreCase))
+        {
+            // `unset` names a key; without one it is a usage error, not a setting called
+            // "unset" (S5).
+            var key = rest.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+            if (key == null) { Log("settings: usage — settings unset <key>"); return; }
+            if (SettingsWriter.TryUnset(ConfigPath, key, out var uerr))
+                Log($"settings: unset {key} — reverts to default; takes effect on reload");
+            else Log($"settings: refused — {uerr}");
+            return;
+        }
+
+        if (rest.Length == 0)
+        {
+            if (!SettingsCatalog.TryGet(head, out var d)) { Log($"settings: unknown setting \"{head}\""); return; }
+            var r = _manager.Config.Settings.Get(d.Key);
+            Log($"{d.Key} = {r.Value}  ({r.Source}, {d.Applies}, {d.Kind}{(d.Kind == SettingKind.Int ? $" {d.Min}..{d.Max}" : "")})  {d.Help}");
+            return;
+        }
+
+        // Even a Live setting only re-resolves when the config is reloaded — the
+        // message says so rather than implying an effect that has not happened.
+        if (SettingsWriter.TrySet(ConfigPath, head, rest, out var err, out var def))
+            Log($"settings: set {def!.Key} = {rest}" +
+                (def.Applies == SettingApplies.Startup ? " — takes effect on reload" : " — live on next read after reload"));
+        else Log($"settings: refused — {err}");
+    }
+
     private bool HandleReload(string arg)
     {
+        // Killing a live orchestrator with sessions attached over a typo would be worse
+        // than the typo: validate huddle.json BEFORE this process agrees to exit, and
+        // leave the running settings in force when it will not load.
+        //
+        // EVERY load failure, not just SettingsException — a trailing comma raises
+        // JsonException, a deleted file FileNotFoundException, and those used to escape
+        // and kill huddle outright, which is the exact outcome this guard exists to
+        // prevent (S2). Whatever went wrong, the answer is the same: refuse and stay up.
+        try
+        {
+            HuddleConfig.Load(ConfigPath);
+        }
+        catch (SettingsException ex)
+        {
+            Log("reload: refused — huddle.json settings would not load; running settings stay in force:");
+            foreach (var e in ex.Errors) Log($"  {e}");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Log($"reload: refused — {Path.GetFullPath(ConfigPath)} would not load; running settings stay in force:");
+            Log($"  {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+
         var repoRoot = Directory.GetCurrentDirectory();
         var helper = Path.Combine(repoRoot, "build-restart.cmd");
         if (!File.Exists(helper))
@@ -2229,7 +2574,15 @@ public class ConsoleUI
             return;
         }
 
+        // Null means the target's repo has no ledger that can be written. Refuse rather
+        // than dispatch an obligation nothing is recording — the delegation would look
+        // fine here and be invisible in `tasks` and `ledger` after the next restart.
         var task = Orchestrator.Tasks.Create(description, targetId, "_huddle");
+        if (task is null)
+        {
+            Log($"Not delegated: no writable ledger for {targetId}'s repo, so the task could not be tracked.");
+            return;
+        }
 
         // Send IPC task message to target
         var targetSafe = targetId.Replace(':', '_');
@@ -2598,13 +2951,13 @@ public class ConsoleUI
         try { return File.GetLastWriteTime(file); } catch { return DateTime.Now; }
     }
 
+    // One age ladder, in LedgerView.Age (the name the repo-stats work will call).
+    // Mail keeps its own word for "under a minute": `backlog` has always shown "now"
+    // there, and the ledger shows "0m".
     private static string FormatAge(DateTime ts)
     {
-        var span = DateTime.Now - ts;
-        if (span.TotalDays >= 1) return $"{(int)span.TotalDays}d";
-        if (span.TotalHours >= 1) return $"{(int)span.TotalHours}h";
-        if (span.TotalMinutes >= 1) return $"{(int)span.TotalMinutes}m";
-        return "now";
+        var age = LedgerView.Age(DateTime.Now - ts);
+        return age == "0m" ? "now" : age;
     }
 
     private static string Truncate(string s, int max)

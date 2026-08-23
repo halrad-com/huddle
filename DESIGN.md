@@ -606,6 +606,69 @@ ledger, not a gatekeeper on the way into it. Two routes, one meaning:
 - The mail `claim` command still works and behaves the same way — it records and reports,
   and always acks. `nack:claim` no longer means contention; it means a malformed request.
 
+## The feature ledger
+
+Two ledgers, different questions. The **claims** ledger above answers *who is touching
+which file right now* and is disposable — it lives under `ipc/` and means nothing after
+the session ends. The **feature** ledger answers *what did we say we would do, and what
+became of it*, and is committed to the repo it describes.
+
+It exists because the audit found four assignments that were mailed, arrived, and were
+never acted on — with nothing anywhere that made the omission visible afterwards. The
+session holding them reported "nothing in flight, inbox clear" repeatedly and was, by
+every surface huddle had, telling the truth.
+
+### Two files per repo, under `docs/ledger/`
+
+| File | Written by | Why |
+|---|---|---|
+| `ledger.md` | humans and architect agents | the hierarchy — epic, scenario, story, feature, deliverable. Rare, deliberate, reviewable in a diff |
+| `events.jsonl` | the orchestrator, only | append-only. Every task, and every state transition of everything |
+
+The split is by **write frequency and writer**, not by concept. Task state changes many
+times a day and is written concurrently by a machine; a shared markdown table would
+conflict daily. The hierarchy changes rarely and benefits from review.
+
+Schema, states, id scheme and parsing rules are in
+[`docs/ledger/README.md`](docs/ledger/README.md), which ships publicly. The ledger *data*
+does not — it names private repos and priorities, and is on the release playbook's
+"Explicitly NOT shipped" list.
+
+### Rules worth knowing before reading the code
+
+- **The orchestrator is the only writer.** `LedgerWriter` is the single append path, and
+  it holds a machine-scoped named mutex, so two huddles cannot interleave half a line.
+  The `huddle --ledger` CLI and every render path stay read-only.
+- **Ids are compared parsed, never as text.** `T-7`, `T-007` and `repo:T-007` are one
+  task. Keying on the string made them three, so an acknowledgement could silently open a
+  second task and leave the first hanging in `assigned` forever.
+- **Nothing is deleted.** `dropped`, `declined` and `abandoned` are terminal states, not
+  removals. The trail of work that did not happen is the point.
+- **Hierarchy state is an overlay.** Huddle never rewrites `ledger.md`, so
+  `ledger accept` and `ledger drop` append a `state` event and every reader applies the
+  latest by timestamp on top. The State column is the baseline; events win.
+- **Orphans are a signal, not an error.** A task with no parent is work nobody ideated.
+  `ledger orphans` counts them, and they are never blocked or auto-parented.
+- **Delivered is not accepted.** A work-queue unit reaching Done appends
+  `task-delivered`. Acceptance is `ledger accept`, and it refuses when a Deliverable's
+  `accepts` gate is unnamed. Those were the same word before, which is why all 13
+  persisted units read Done including the one the operator later found broken.
+
+### How an obligation gets recorded without anyone asking
+
+| Producer | Dedup key | Opens |
+|---|---|---|
+| `type:"task"` mail, any agent to any agent | the mail file's path | `task-assigned` owned by the recipient |
+| `delegate-task` / the `delegate` verb | the task id | `task-assigned` owned by the assignee |
+| a dispatched work-queue unit | `unit:<id>` | `task-assigned` owned by `repo:persona` |
+
+Each is keyed so a rescan, a retry or a restart re-finds the existing row instead of
+opening a second. Moving mail from `inbox/` to `processed/` appends `task-acked` —
+acknowledgement already had a filesystem meaning and this reuses it rather than inventing
+a second one. Anything still in `assigned` past `taskAckMinutes` escalates **once**, to
+the dispatcher by mail and to the operator on the console; "already escalated" is read
+back out of the log, so a restart does not re-announce every old assignment at once.
+
 ### Direct ledger access (`huddle --claim`)
 
 Three argument modes on the binary. They **run huddle.exe and never contact a running
@@ -941,11 +1004,15 @@ run it from the repo root or use `--config` to point at the config.
 | `huddle <group>` | Launch all sessions in a named group. Groups are defined in `huddle.json`. Run without argument to list available groups. | `huddle dev` |
 | `send <instance> <msg>` | Send an IPC message to a session's inbox. The session can read it from its mailbox. | `send app:architect check the API docs` |
 | `messages <instance>` | Read messages in a session's inbox. Shows sender, type, subject, and body. | `messages app:architect` |
-| `delegate "desc" to <instance>` | Delegate a task to a session. Creates a tracked task, sends it via IPC, and auto-starts the session if it's not running. | `delegate "fix login bug" to app:backenddev` |
+| `delegate "desc" to <instance>` | Delegate a task to a session. Opens a tracked task in the assignee repo's feature ledger, sends it via IPC, and auto-starts the session if it's not running. Refuses when that repo has no writable ledger, rather than dispatching an obligation nothing is recording. | `delegate "fix login bug" to app:backenddev` |
 | `direct <english task>` | Hand a free-form task to `huddle:architect` with `autoFire: true`. Architect plans and dispatches via `dispatch-batch` without a confirmation step. | `direct clean up the auth flow` |
 | `broadcast [@repo] <message>` | Fan out an informational message to every live session (optionally scoped to one or more repos). The subject is derived from the message. Orchestrator refuses command-type broadcasts. | `broadcast heads-up merge window in 30 min` |
 | `shell [<repo>] <data>` | Hand `<data>` to the OS shell (`ShellExecute`) — opens files, URLs, folders. Optional repo sets working directory. Fire-and-forget. | `shell app deploy\\build.cmd` |
-| `tasks` | Show all tracked tasks with state (pending, delegated, in-progress, completed, failed), assignee, and description. | `tasks` |
+| `tasks` | Show all tracked tasks with state (pending, delegated, in-progress, completed, failed), assignee, and description. Materialized from each repo's feature-ledger event log, so ids and obligations survive a restart. | `tasks` |
+| `ledger [all\|<id>\|open\|orphans]` | The feature ledger (`docs/ledger/`). No argument = tree for the current repo, open items only; `all` includes accepted and dropped; `<id>` shows one item with its ancestry, children and event history; `open` is every open item across repos oldest first (`--by-age` names that default); `orphans` lists tasks nobody parented. `--repo` / `--owner` scope it. See [The feature ledger](#the-feature-ledger). | `ledger open` |
+| `ledger accept <id>` | Record acceptance. Refused unless the item is `delivered`, and refused for a Deliverable whose `accepts` gate is unnamed — huddle does not run the gate, it declines to record acceptance when nobody has said what would prove the work. An orphan task has no Deliverable to gate against, so it is allowed and the event records `ungated`. | `ledger accept F-002` |
+| `ledger drop <id> <why>` | Stop a hierarchy item. The reason is required and kept: `dropped` is a terminal state, not a deletion, and an unexplained drop is the audit gap this design closes. | `ledger drop F-004 superseded` |
+| `ledger decline <id> [note]` | Hand a task back. Cheap and recorded (§6.2) — the release valve for auto-created rows. Work already under way is `abandoned` instead. | `ledger decline T-107 not mine` |
 | `progress` | Show the last scratchpad checkpoint for each running session. Sessions write checkpoints to `logs/<name>/scratchpad.md` as they work. | `progress` |
 | `conflicts` | Show file claim overlaps across sessions. Reads both the freeform `workledger/*.md` files and the structured `workledger/claims/` files — written by agents via `huddle --claim` and by the orchestrator for dispatched work; lists active claims even when no overlap. | `conflicts` |
 | `replay <repo>` | Run the repo's captured regression tests (MBXHVAL capture suites in `MBXHVAL/tests/suites/captures/`) against its live test instance via `mbxhval`, and report pass/fail. Needs `mbxhvalPath` in `huddle.json`. See [Capture Replay](#capture-replay-replay-verb). | `replay myapp` |
@@ -972,7 +1039,9 @@ run it from the repo root or use `--config` to point at the config.
 | Shared context | `context.md` written on every state change so sessions can see what else is running. |
 | File-based IPC | JSON message files for inter-session communication. Each session gets inbox/outbox paths. |
 | Orchestrator engine | Watches `_huddle/inbox/` for commands. Sessions can programmatically start/stop other sessions and delegate tasks. |
-| Task tracking | In-memory task tracker for delegated work. Status updates via IPC. |
+| Task tracking | Tasks are rows in the assignee repo's feature-ledger event log, not an in-memory dictionary. Ids survive restarts (`T001` was previously issued 23 times), and a status update for work that really happened no longer nacks "unknown task". |
+| Feature ledger | Per-repo `docs/ledger/` — a git-tracked index of work from epic to task that references documents rather than containing them. `ledger.md` is the operator's hierarchy; `events.jsonl` is the orchestrator's append-only log of every task and every transition. Answers what the claims ledger cannot: what was accepted, and what was asked for and never done. See [The feature ledger](#the-feature-ledger). |
+| Obligations are durable and automatic | Any `type:"task"` mail between any two agents opens a tracked row keyed on the mail file; moving it to `processed/` timestamps the acknowledgement; a dispatched queue unit is a task keyed on `unit:<id>`; a unit reaching Done is **delivered**, never accepted; anything unacknowledged past `taskAckMinutes` escalates once to the dispatcher and the operator. |
 | Session groups | Named groups in config for launching multiple sessions with one command. |
 | Scratchpad & checkpoints | Per-session scratchpad for progress notes. `progress` command shows last checkpoint across all sessions. |
 | Graceful shutdown | `shutdown` stops all sessions. `quit` exits huddle but leaves sessions running. |

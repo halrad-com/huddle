@@ -174,6 +174,9 @@ public static class GitHelper
         return b.Length == 0 || b == "HEAD" ? null : b;
     }
 
+    /// <summary>Public surface for read-only git queries by stats/remote-identity code.</summary>
+    public static (bool ok, string stdout, string stderr) RunRaw(string repoRoot, string args) => Run(repoRoot, args);
+
     private static (bool ok, string stdout, string stderr) Run(string repoRoot, string args)
     {
         try

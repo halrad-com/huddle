@@ -61,5 +61,9 @@
   "crashLogRetention": 10,
   "rescanIntervalSeconds": 30,
   "reclaimResourcesOnStop": false,
-  "seedPermissions": true
+  "seedPermissions": true,
+  "settings": {
+    "taskAckMinutes": 15,
+    "statsSinceDays": 7
+  }
 }

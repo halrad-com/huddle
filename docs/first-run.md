@@ -9,14 +9,14 @@ separate installer.
 A clone gives you the **base** — source, build scripts, the default personas, and a
 **config template**. It does **not** include anyone's personal state. Specifically:
 
-| In the repo (base / default) | Not in the repo (per-machine — you create it) |
-|------------------------------|-----------------------------------------------|
-| `src/`, `huddle.sln`, `build.cmd`, `build-restart.cmd` | `huddle.json` — your live config (gitignored) |
-| `personas/*.md` + `*.json` — the shipped roles | `.claude/settings.local.json` — your Claude Code permissions (gitignored) |
-| `template.json` — the config starter | `publish/`, `bin/`, `obj/` — build output (gitignored) |
-| `.claude/settings.json` — default permissions | `logs/` — scratchpads, crash logs (gitignored) |
-| `scripts/statusline.ps1`, `inspect-jsonl.ps1` | `ipc/` traffic — inboxes, claims, ledger (gitignored) |
-| `README.md`, `DESIGN.md`, `llms.txt`, `docs/` | |
+| In the repo (base / default)                           | Not in the repo (per-machine — you create it)                             |
+| ------------------------------------------------------ | ------------------------------------------------------------------------- |
+| `src/`, `huddle.sln`, `build.cmd`, `build-restart.cmd` | `huddle.json` — your live config (gitignored)                             |
+| `personas/*.md` + `*.json` — the shipped roles         | `.claude/settings.local.json` — your Claude Code permissions (gitignored) |
+| `template.json` — the config starter                   | `publish/`, `bin/`, `obj/` — build output (gitignored)                    |
+| `.claude/settings.json` — default permissions          | `logs/` — scratchpads, crash logs (gitignored)                            |
+| `scripts/statusline.ps1`, `inspect-jsonl.ps1`          | `ipc/` traffic — inboxes, claims, ledger (gitignored)                     |
+| `README.md`, `DESIGN.md`, `llms.txt`, `docs/`          |                                                                           |
 
 Your configuration and the default configuration are kept separate by design: the repo
 ships the base, and your machine-specific files are gitignored so they never travel with
@@ -109,11 +109,11 @@ No sessions start automatically unless you set `autoStart: true` in `huddle.json
 
 Huddle is designed to scale along one continuous path — the same model, just more of it:
 
-| Tier | What it is | Status |
-|------|------------|--------|
-| **1 session, 1 machine** | One Claude session in a crash-isolated window; restart on Bun panic. | Shipping |
-| **N sessions, 1 machine** | Many sessions in parallel under one huddle, sharing `ipc/` — messaging, file-claim locking, Work Ledger, `dispatch-batch`, plain-English `direct`. | Shipping (the default) |
-| **N sessions × M machines** | Several machines, each running several sessions, coordinating across boxes over a shared IPC directory on a file share. | Shipping (shared file share) |
+| Tier                        | What it is                                                                                                                                         | Status                       |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| **1 session, 1 machine**    | One Claude session in a crash-isolated window; restart on Bun panic.                                                                               | Shipping                     |
+| **N sessions, 1 machine**   | Many sessions in parallel under one huddle, sharing `ipc/` — messaging, file-claim locking, Work Ledger, `dispatch-batch`, plain-English `direct`. | Shipping (the default)       |
+| **N sessions × M machines** | Several machines, each running several sessions, coordinating across boxes over a shared IPC directory on a file share.                            | Shipping (shared file share) |
 
 You don't change tools as you grow: the verbs, personas, and coordination primitives are
 the same whether you're running one session or a fleet across machines. Because IPC is just
@@ -138,12 +138,12 @@ of its config file. So the way to span machines is to put the working set — in
 and point each machine's huddle at the same config.
 
 Concrete example (the setup this repo runs on): the repo lives at the UNC path
-`\\nas\users\source\repos\seatbelt` and **every** machine maps that share to `S:`. So on
+`\\computer\users\source\repos\myapp` and **every** machine maps that share to `S:`. So on
 each box:
 
 ```
-S:\source\repos\seatbelt\publish\huddle.exe
-# or: huddle.exe --config S:\source\repos\seatbelt\huddle.json
+S:\source\repos\myapp\publish\huddle.exe
+# or: huddle.exe --config S:\source\repos\myapp\huddle.json
 ```
 
 Because all machines see the identical `S:\...` paths, the repo `root` paths in
@@ -155,7 +155,7 @@ same file-based IPC, just located where every machine can reach it.
 
 Practical notes for the shared-share setup:
 
-- **Map the same drive letter on every machine** (here, `S:` → `\\nas\users`). That's what
+- **Map the same drive letter on every machine** (here, `S:` → `\\\\computer\\users`). That's what
   makes the `root` paths in `huddle.json` valid on all boxes without per-machine configs.
 - The share must support normal file create/rename/delete with reasonable consistency
   (SMB on a LAN is fine). The orchestrator already tolerates missed events via its rescan
@@ -169,8 +169,10 @@ Practical notes for the shared-share setup:
   multi-machine over a single shared `ipc/` does not require it.
 
 A related but separate concern — keeping `~/.claude/` (CLAUDE.md, memory, skills, settings)
-consistent across machines so agents share calibration — is out of scope for huddle
-itself; treat it as a per-machine setup step.
+consistent across machines so agents share calibration — is captured in
+[`docs/claude-config-sync-spec.md`](claude-config-sync-spec.md) (idea stage), with a
+real migration log at
+[`docs/2026-04-26-workstation-b-claude-config-migration.md`](2026-04-26-workstation-b-claude-config-migration.md).
 
 ## Notes for verifying a clean enlistment
 
