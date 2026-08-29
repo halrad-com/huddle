@@ -167,6 +167,24 @@ public class IpcManager : IDisposable
     public event Func<string /*instanceId*/, IpcMessage, string /*filePath*/, bool>? MessageReceived;
 
     /// <summary>
+    /// Every parsed inbox file, on every pass — including mail that was announced long
+    /// ago and is still sitting unread. <see cref="MessageReceived"/> fires ONCE per file
+    /// and is the wrong signal for anything durable.
+    ///
+    /// <para>This exists because the feature ledger was wired to the nudge. Ingest sat
+    /// behind the already-announced early return, so a <c>type:"task"</c> mail announced
+    /// before the ledger shipped could never open a row — and nothing backfilled, because
+    /// announcement happens once and never repeats. Two real assignments sat unread and
+    /// untracked for eight and ten days while every ledger surface reported nothing
+    /// open.</para>
+    ///
+    /// <para>So: the OBLIGATION comes from the mail being there; the NUDGE comes from
+    /// announcement. Handlers must be idempotent — this fires on every scan for as long
+    /// as the mail stays unread — and cheap, for the same reason.</para>
+    /// </summary>
+    public Action<string /*instanceId*/, IpcMessage, string /*filePath*/>? MailSeen;
+
+    /// <summary>
     /// Nudge an idle session so its hook drains pending.txt. Set by the host (Program),
     /// which owns process handles and transcript paths — IpcManager stays free of both.
     /// Returns true when a wake was actually injected. Called from the retry tick for
@@ -353,6 +371,59 @@ public class IpcManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Offer EVERY inbox on disk to <see cref="MailSeen"/> once, including inboxes
+    /// belonging to sessions huddle no longer tracks.
+    ///
+    /// <para>The per-session scan only reaches inboxes that something called
+    /// <see cref="Watch"/> for, which means a session that has since been stopped keeps
+    /// its unread mail entirely to itself. That is not a lesser case: an assignment does
+    /// not stop being owed because the agent that was going to do it exited. A
+    /// twenty-day-old task mail sat in a stopped session's inbox, unseen for exactly this
+    /// reason, after the announced-once bug above had already been fixed.</para>
+    ///
+    /// <para>Announcement is deliberately NOT part of this. There is nobody to wake and
+    /// no wake line is written, so the delivered index is untouched and a session that
+    /// later starts still gets its own first-run scan. Handlers that cannot place the
+    /// mail — an unregistered repo, say — are expected to ignore it.</para>
+    /// </summary>
+    public void SweepAllInboxes()
+    {
+        if (MailSeen == null) return;
+
+        string[] dirs;
+        try { dirs = Directory.GetDirectories(_ipcDir); }
+        catch (Exception ex) { _log($"IPC: inbox sweep could not list {_ipcDir}: {ex.Message}"); return; }
+
+        foreach (var dir in dirs)
+        {
+            var safe = Path.GetFileName(dir);
+            // _huddle is the orchestrator's own command drop, not a session mailbox.
+            if (safe.Length == 0 || safe[0] == '_') continue;
+
+            var inbox = Path.Combine(dir, "inbox");
+            string[] files;
+            try { files = Directory.GetFiles(inbox, "*.json"); }
+            catch { continue; }   // no inbox here (workledger, resledger, gitauth…)
+
+            // repo_persona -> repo:persona. Only the FIRST underscore separates them;
+            // persona names carry their own (architect-2, feature-dev).
+            var us = safe.IndexOf('_');
+            if (us <= 0) continue;
+            var instanceId = safe[..us] + ":" + safe[(us + 1)..];
+            foreach (var file in files.OrderBy(f => f))
+            {
+                IpcMessage? msg;
+                try { msg = TryParse(File.ReadAllText(file), Path.GetFileName(file), _log); }
+                catch { continue; }   // mid-write or unreadable — the owning scan retries
+                if (msg == null) continue;
+
+                try { MailSeen.Invoke(instanceId, msg, file); }
+                catch (Exception ex) { _log($"IPC: MailSeen handler threw during sweep: {ex.Message}"); }
+            }
+        }
+    }
+
     private void OnInboxEvent(string instanceId, string fullPath, string name)
     {
         try
@@ -378,10 +449,11 @@ public class IpcManager : IDisposable
     }
 
     // Periodic re-drive of undelivered mail, and cleanup of mail the agent has
-    // acknowledged. Runs every RetryInterval. Announced mail is skipped by the
-    // delivered index, so only genuinely-undelivered files are re-driven — chiefly
-    // nudges held because the operator was at the recipient's console. Quiet: no
-    // per-file log spam.
+    // acknowledged. Runs every RetryInterval. The delivered index suppresses the NUDGE
+    // for announced mail — chiefly nudges held because the operator was at the
+    // recipient's console — but every unread file is still parsed and offered to
+    // MailSeen, which is what keeps a durable obligation from depending on a one-shot
+    // signal. Quiet: no per-file log spam.
     private void RetryTick(object? state)
     {
         if (Interlocked.Exchange(ref _retryRunning, 1) == 1) return; // a tick is still running
@@ -435,7 +507,10 @@ public class IpcManager : IDisposable
         if (!File.Exists(fullPath)) return;
 
         var safe = SafeNameFor(fullPath);
-        if (safe.Length > 0 && AlreadyAnnounced(safe, name)) return;
+        // NOT an early return any more. Announced-once used to end the pass here, which
+        // put every durable consequence of a piece of mail behind a one-shot signal —
+        // see MailSeen. Announcement now only suppresses the NUDGE, below.
+        var announced = safe.Length > 0 && AlreadyAnnounced(safe, name);
 
         string json;
         try { json = File.ReadAllText(fullPath); }
@@ -463,6 +538,17 @@ public class IpcManager : IDisposable
                 Subject = $"mail file is not valid JSON ({name}); open it and read the raw text"
             };
         }
+        // Fires for announced mail too — this is the pass that backfills a row for mail
+        // that has been sitting unread since before the ledger existed. Kept ahead of the
+        // announced return so it cannot drift back behind it.
+        try { MailSeen?.Invoke(instanceId, msg, fullPath); }
+        catch (Exception ex) { _log($"IPC: MailSeen handler threw: {ex.Message}"); }
+
+        // Everything from here is the ANNOUNCEMENT: the console line, the handoff record
+        // and the wake. Those are one-shot by design — re-announcing unread mail on every
+        // scan is the nag this index exists to prevent.
+        if (announced) return;
+
         if (!quiet) _log($"IPC [{instanceId}] from {msg.From}: {msg.Subject}");
 
         // A handoff mail is recorded + announced the moment it lands, regardless of

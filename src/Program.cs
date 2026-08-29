@@ -277,18 +277,16 @@ class Program
                 // rescan all re-find the same row rather than opening three. This is the
                 // change that catches peer-to-peer dispatch — the audit's four dropped
                 // assignments were all type:"task".
+                // The row itself is opened by the MailSeen handler below, which runs on
+                // every pass and does not need the recipient to be alive. Here we only
+                // LOOK IT UP, so the wake line can say TASK. Opening it here as well
+                // would put the obligation back behind a live session and a one-shot
+                // announcement — which is exactly how two assignments went untracked.
                 LedgerId? taskId = null;
-                if (LedgerMailIngest.IsTask(msg) && ledgerWriters.ForInstance(instanceId) is { } writer)
-                {
-                    if (writer.TryFindTaskByRef(relPath, out var existing)) taskId = existing;
-                    else
-                    {
-                        taskId = writer.AppendNewTask(id =>
-                            LedgerMailIngest.Assigned(msg, relPath, instanceId, id, DateTimeOffset.UtcNow)!);
-                        if (taskId is { } opened)
-                            ConsoleUI.Log($"ledger: {opened} assigned to {instanceId} by {msg.From}");
-                    }
-                }
+                if (LedgerMailIngest.IsTask(msg)
+                    && ledgerWriters.ForInstance(instanceId) is { } writer
+                    && writer.TryFindTaskByRef(relPath, out var existing))
+                    taskId = existing;
 
                 // A task must not read like an FYI in the one line an agent often sees
                 // before deciding whether to interrupt itself (§5.8). A ledger that could
@@ -329,6 +327,28 @@ class Program
                 if (inst is null || pid <= 0) return false;
                 if (!MailWake.ShouldWakeSession(TranscriptOf(inst), MailWake.IdleAfter)) return false;
                 return PromptInjector.Inject(pid, MailWake.WakeLine, ConsoleUI.Log);
+            };
+
+            // Spec §5.4, corrected: a task mail opens a tracked row because the mail
+            // EXISTS, not because a nudge landed. Runs on every scan for as long as the
+            // mail sits unread, needs no live recipient, and is idempotent on the same
+            // MailRef the acknowledgement path uses — so a mail that already has a row is
+            // never opened twice, and one that never got a row finally gets one.
+            //
+            // This is the backfill. Task mail delivered before the ledger shipped was
+            // announced once, recorded in delivered.txt, and then invisible forever.
+            ipcManager.MailSeen = (instanceId, msg, filePath) =>
+            {
+                if (!LedgerMailIngest.IsTask(msg)) return;
+                if (ledgerWriters.ForInstance(instanceId) is not { } writer) return;
+
+                var rel = LedgerMailIngest.MailRef(configDir, filePath);
+                if (writer.TryFindTaskByRef(rel, out _)) return;
+
+                var opened = writer.AppendNewTask(id =>
+                    LedgerMailIngest.Assigned(msg, rel, instanceId, id, DateTimeOffset.UtcNow)!);
+                if (opened is { } id2)
+                    ConsoleUI.Log($"ledger: {id2} assigned to {instanceId} by {msg.From}");
             };
 
             // Mail leaving the inbox is acknowledgement, and acknowledgement is the
@@ -420,6 +440,12 @@ class Program
         // Now that the live set is known, sweep claims stranded by dead/untracked instances
         // (this is what makes "bounce huddle to reap dead-session claims" actually true).
         orchestrator?.ReapOrphanClaims();
+
+        // Same moment, same reason, for obligations: a task mail sitting in the inbox of a
+        // session nobody is watching is still work somebody was asked to do. Runs after
+        // repo registration so ForInstance can resolve a writer; harmless when every
+        // inbox is already tracked, because opening a row is idempotent on the mail path.
+        ipcManager?.SweepAllInboxes();
 
         // I010: dead sessions were held, not dropped — announce the roster.
         ui.StateFile = stateFile;
