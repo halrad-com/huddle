@@ -151,6 +151,25 @@ public static class LedgerMailIngest
         return s.Length <= MaxTitle ? s : s[..MaxTitle];
     }
 
-    static string OneLine(string s) =>
-        s.Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ').Trim();
+    /// <summary>
+    /// Longest subject the nudge will carry. The line is now INJECTED into the recipient's
+    /// console, not just appended to pending.txt, and a subject is free text an agent
+    /// hand-writes — the mail that prompted this fix had a 137-character one and nothing
+    /// stops the next being thousands. WriteAllChunked would survive it (256-record chunks
+    /// with backoff), but a console does not need the whole subject to identify a mail it
+    /// is being handed a path to. Truncation is cosmetic; the full text is in the file.
+    /// </summary>
+    public const int MaxSubjectInNudge = 120;
+
+    /// <summary>
+    /// Subject reduced to something safe to type into a console: no line breaks, bounded
+    /// length. Collapsing the breaks is the load-bearing half — an embedded newline in an
+    /// injected string is an extra Enter, which would submit the line early and leave the
+    /// tail as a second stray prompt.
+    /// </summary>
+    static string OneLine(string s)
+    {
+        var flat = s.Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return flat.Length <= MaxSubjectInNudge ? flat : flat[..(MaxSubjectInNudge - 1)].TrimEnd() + "…";
+    }
 }

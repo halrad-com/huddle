@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -110,6 +110,56 @@ public static class MailWake
             return false;
         }
         catch { return false; }
+    }
+}
+
+public static class PendingWake
+{
+    /// <summary>
+    /// The text huddle types into a session's console to wake it. THE only producer of
+    /// injected wake text — both the delivery path and the retry tick's re-drive call
+    /// this, and neither picks a string of its own.
+    ///
+    /// <para>That single-producer property is the point, not a tidiness preference. The
+    /// regression this fixes was a call site quietly swapping the real line for the
+    /// contentless <see cref="MailWake.WakeLine"/> carrier, and nothing failing. There is
+    /// now no call site that chooses: delivery appends the nudge to pending.txt and then
+    /// asks this what to type, so the file is the single source of truth for what a
+    /// session is being woken about, and dropping the sender means breaking the tests
+    /// below rather than editing a lambda.</para>
+    ///
+    /// <para>The newest line leads because it is the arrival being announced; a count
+    /// covers anything still queued behind it. The bare carrier survives only as the
+    /// cannot-read fallback — a contentless wake still beats the dead letter that adding
+    /// the wake fixed in the first place.</para>
+    /// </summary>
+    public static string LineFor(string pendingPath)
+    {
+        try
+        {
+            var lines = File.ReadAllLines(pendingPath)
+                            .Select(Strip)
+                            .Where(l => l.Length > 0)
+                            .ToArray();
+            if (lines.Length == 0) return MailWake.WakeLine;
+
+            var last = lines[^1];
+            return lines.Length == 1 ? last : $"{last}  (+{lines.Length - 1} more queued)";
+        }
+        catch { return MailWake.WakeLine; }
+    }
+
+    /// <summary>
+    /// Drop the non-blocking marker AppendPending prefixes (<see
+    /// cref="IpcManager.InfoPendingSentinel"/>). The hook strips it before display; this
+    /// path types the line straight into a console, so it has to strip it too or the
+    /// control character goes to the terminal.
+    /// </summary>
+    private static string Strip(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return "";
+        var s = line.Trim();
+        return s.Length > 0 && s[0] == IpcManager.InfoPendingSentinel ? s[1..].Trim() : s;
     }
 }
 
@@ -558,6 +608,11 @@ public class IpcManager : IDisposable
         if (string.Equals(msg.Type, "handoff", StringComparison.OrdinalIgnoreCase))
             RecordHandoff(msg, name);
 
+        // Give the SENDER a record of what it sent. Sits with the announcement because it
+        // is one-shot for the same reason, and after RecordHandoff so a failure here can
+        // never cost the handoff ledger its entry.
+        RecordOutbound(msg, name);
+
         // Internal sender already handled the nudge (broadcast fan-out,
         // orchestrator ack/nack reply) and the body content is structured
         // for the orchestrator's own bookkeeping, not for an agent to read
@@ -587,6 +642,73 @@ public class IpcManager : IDisposable
 
     // Record a handoff mail to the ledger and, if it's new, announce it in the console:
     //   [handoff] <from> -> <to>: <task> (<state>)
+    /// <summary>
+    /// Write a receipt into the SENDER's outbox for a mail huddle has just delivered.
+    ///
+    /// <para>Every session has had an outbox/ since the first IPC commit and nothing has
+    /// ever written to it. Agents mail each other by writing straight into the recipient's
+    /// inbox, so a sender leaves no trace of its own correspondence anywhere — and an
+    /// empty outbox is indistinguishable from having sent nothing. On 2026-08-28
+    /// otherapp:architect checked its outbox to see whether it had made an offer that
+    /// myapp:architect said it was accepting, found nothing, and reported to the
+    /// operator that the offer had been invented. It had not: otherapp had made it four
+    /// days earlier, and the proof was sitting in the RECIPIENT's processed/ where only
+    /// the other party could see it. An agent must be able to substantiate its own history
+    /// from its own mailbox.</para>
+    ///
+    /// <para>The receipt is huddle's OBSERVATION, not the sender's claim. observedAt is
+    /// huddle's clock, and the sender's own timestamp is recorded beside it as
+    /// claimedTimestamp precisely so the two can disagree — the mail that triggered this
+    /// was stamped three hours in the future by the agent that wrote it. From is still
+    /// self-declared and huddle still cannot authenticate it; what this establishes is
+    /// that a mail bearing that name was really delivered, when, and to whom.</para>
+    /// </summary>
+    private void RecordOutbound(IpcMessage msg, string sourceName)
+    {
+        try
+        {
+            var safeFrom = SafeName(msg.From);
+            if (safeFrom.Length == 0) return;
+
+            var outbox = Path.Combine(_ipcDir, safeFrom, "outbox");
+            Directory.CreateDirectory(outbox);
+
+            var receipt = Path.Combine(outbox, sourceName);
+            // Idempotent: the receipt is named for the mail file, so a re-processed inbox
+            // never writes a second copy of the same send.
+            if (File.Exists(receipt)) return;
+
+            var record = new
+            {
+                from = msg.From,
+                to = msg.To,
+                subject = msg.Subject,
+                type = msg.Type,
+                claimedTimestamp = msg.Timestamp,
+                observedAt = DateTime.UtcNow.ToString("o"),
+                mailFile = sourceName
+            };
+            File.WriteAllText(receipt,
+                JsonSerializer.Serialize(record, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch (Exception ex)
+        {
+            // A missing receipt must never cost the delivery it is describing.
+            _log($"IPC: could not record outbound receipt for {sourceName}: {ex.Message}");
+        }
+    }
+
+    /// <summary>Safe-name form of an instance id ("repo:persona" -> "repo_persona"), which
+    /// is how mailbox directories are named. Returns empty for an id huddle cannot place —
+    /// the synthesized "unknown sender" envelope, notably, which owns no mailbox.</summary>
+    private static string SafeName(string? instanceId)
+    {
+        if (string.IsNullOrWhiteSpace(instanceId)) return "";
+        var s = instanceId.Trim();
+        if (s.Contains(' ')) return "";           // "unknown sender" and friends
+        return s.Replace(':', '_');
+    }
+
     private void RecordHandoff(IpcMessage msg, string sourceName)
     {
         try

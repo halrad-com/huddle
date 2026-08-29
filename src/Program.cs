@@ -310,8 +310,27 @@ class Program
                 // Inject keeps its foreground gate, so an operator typing at the recipient's
                 // console is never stomped; a held wake is re-driven by IpcManager's retry
                 // tick (WakeIdle below) once they step away.
+                //
+                // Type the QUEUE, not a carrier. The submit exists to give the hook
+                // something to fold pending.txt onto, so for a while it was the contentless
+                // MailWake.WakeLine — "[huddle] you have mail" and nothing else. That is
+                // survivable only while the fold always happens. When it does not (hook
+                // absent, or pending.txt already drained on an earlier turn boundary) the
+                // agent gets a ping naming no sender, no subject and no path, and its only
+                // move is to go hunting. On 2026-08-28 otherapp:architect took exactly that
+                // ping mid-review, went looking, misread an outbox that is empty by design,
+                // and told the operator a colleague had fabricated a request that colleague
+                // had genuinely made four days earlier.
+                //
+                // The line was appended to pending.txt immediately above, so the file
+                // already holds it — and everything else still queued. Asking PendingWake
+                // for the text means this site does not CHOOSE a string at all, which is
+                // what stops the swap-back: same producer as the re-drive below, and the
+                // only one, so losing the sender means failing PendingWakeTests rather
+                // than editing a lambda nothing asserts on.
                 if (MailWake.ShouldWakeSession(TranscriptOf(inst), MailWake.IdleAfter))
-                    PromptInjector.Inject(pid, MailWake.WakeLine, ConsoleUI.Log);
+                    PromptInjector.Inject(
+                        pid, PendingWake.LineFor(ipcManager.PendingPath(inst.SafePathName)), ConsoleUI.Log);
                 return true;
             };
 
@@ -326,7 +345,11 @@ class Program
                 var pid = inst?.Process?.Id ?? 0;
                 if (inst is null || pid <= 0) return false;
                 if (!MailWake.ShouldWakeSession(TranscriptOf(inst), MailWake.IdleAfter)) return false;
-                return PromptInjector.Inject(pid, MailWake.WakeLine, ConsoleUI.Log);
+                // Carry the sender here too. This path has no IpcMessage — it only knows
+                // the queue is non-empty — but pending.txt holds the lines that were built
+                // with one, so the newest of them says who and what.
+                return PromptInjector.Inject(
+                    pid, PendingWake.LineFor(ipcManager.PendingPath(safePathName)), ConsoleUI.Log);
             };
 
             // Spec §5.4, corrected: a task mail opens a tracked row because the mail
