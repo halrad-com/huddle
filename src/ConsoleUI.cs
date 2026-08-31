@@ -2687,13 +2687,18 @@ public class ConsoleUI
         }
 
         // The handle is captured at spawn (SessionWindow) rather than read from
-        // Process.MainWindowHandle, which is always zero for a console process —
-        // the window belongs to the console host, not to cmd.exe or claude.
+        // Process.MainWindowHandle, which is always zero for a console process.
+        // No live handle on record (recovered session, or spawn capture missed)?
+        // Resolve it now by the session's tracked PID — a classic console window
+        // reports the console app as its owner, so the lookup is direct.
         var hWnd = instance.WindowHandle;
+        if (!SessionWindow.IsLive(hWnd) && _manager.TryCaptureWindowByPid(instance))
+            hWnd = instance.WindowHandle;
+
         if (!SessionWindow.IsLive(hWnd))
         {
-            Log($"{instance.InstanceId} has no console window on record. " +
-                "Sessions recovered after a huddle restart lose it — restart the session to focus it.");
+            Log($"{instance.InstanceId} has no console window huddle can identify " +
+                "(likely hosted in a Windows Terminal tab). Try Alt+Tab.");
             return;
         }
 

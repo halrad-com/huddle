@@ -6,8 +6,13 @@ namespace Huddle;
 
 /// <summary>
 /// A visible top-level window, as seen during a spawn-time enumeration.
+/// <para><see cref="ProcessId"/> is the window's owning process. For a classic
+/// console window this is the console APPLICATION (cmd.exe), not conhost —
+/// GetWindowThreadProcessId is special-cased for ConsoleWindowClass — which is
+/// exactly the PID huddle tracks per session. Defaults to 0 for callers that
+/// only care about title/name matching.</para>
 /// </summary>
-public readonly record struct WindowInfo(IntPtr Handle, string ProcessName, string Title);
+public readonly record struct WindowInfo(IntPtr Handle, string ProcessName, string Title, uint ProcessId = 0);
 
 /// <summary>
 /// Identifies which console window a spawned session lives in.
@@ -69,6 +74,34 @@ public static class SessionWindow
         return host.Handle;
     }
 
+    /// <summary>
+    /// Choose the window of an ALREADY-RUNNING session by its tracked process id —
+    /// the recovery-path counterpart of <see cref="PickWindow"/>, which needs a
+    /// before/after spawn snapshot this path does not have.
+    ///
+    /// <para>Works because a classic console window reports the console app (the
+    /// session's cmd.exe) as its owning process — measured live 2026-08-31 against
+    /// state.json's persisted PIDs. When Windows Terminal owns the windows they all
+    /// belong to WindowsTerminal, nothing matches, and this correctly returns Zero
+    /// (there is no per-session window to identify there).</para>
+    ///
+    /// Prefers a console-host-owned window when the process owns several. Pure.
+    /// </summary>
+    public static IntPtr PickWindowByPid(
+        IEnumerable<WindowInfo> candidates,
+        uint pid,
+        IReadOnlySet<IntPtr> claimed)
+    {
+        if (pid == 0) return IntPtr.Zero;    // unknown owner: enumeration uses 0 for "exited"
+
+        var mine = candidates
+            .Where(w => w.ProcessId == pid && !claimed.Contains(w.Handle))
+            .ToList();
+
+        var host = mine.FirstOrDefault(w => IsConsoleHost(w.ProcessName));
+        return host.Handle != IntPtr.Zero ? host.Handle : mine.FirstOrDefault().Handle;
+    }
+
     /// <summary>Handles of every visible, titled top-level window.</summary>
     public static HashSet<IntPtr> Snapshot() =>
         Enumerate().Select(w => w.Handle).ToHashSet();
@@ -121,7 +154,7 @@ public static class SessionWindow
                 names[pid] = name;
             }
 
-            found.Add(new WindowInfo(hWnd, name, sb.ToString()));
+            found.Add(new WindowInfo(hWnd, name, sb.ToString(), pid));
             return true;
         }, IntPtr.Zero);
 

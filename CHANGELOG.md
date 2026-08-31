@@ -13,6 +13,24 @@ is the source of truth, the handle is just for reading.
 day: start a new day block at the top of the file. Never rewrite a shipped entry.
 History from before this file lives in the git commit log.
 
+## 2026-08-31
+
+### 2026-08-31.1 — `focus` works on recovered and resumed sessions — `dcdd7b4`
+
+A session huddle didn't spawn this run (recovered after a huddle restart, or adopted
+from a resume) had no captured console window, so `focus` refused with "restart the
+session". That made a live long-running session effectively unreachable — listed
+Running, genuinely alive, no way in — which is what pushed the operator to resume one
+manually outside huddle on 2026-08-31, forking its transcript against the still-live
+original.
+
+Fixed by resolving the window from the PID huddle already tracks: a classic console
+window reports the console application (the session's cmd.exe) as its owner, so no
+spawn-time snapshot is needed. Wired into recovery, resume adoption, and as a lazy
+retry inside `focus` itself (which also heals stale or missed spawn captures). When
+Windows Terminal owns the windows nothing PID-matches and the graceful no-window
+message remains.
+
 ## 2026-08-23
 
 ### 2026-08-23.2 — Feature ledger phase 2: obligations become durable and automatic — `6d3eb25`, `80df445`, `94fa94e`, `a945630`, `3ccb447`, `7021576`, `2fd3fcd`, `4960e8d`, `2ddfb05`, `a0715dc`

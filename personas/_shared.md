@@ -389,6 +389,30 @@ test ships with the code it tests, not as a separate afterthought.
 The operator replays a repo's captures from huddle with `replay <repo>`, which runs every
 suite in that repo's `captures/` dir against its configured test instance via mbxhval.
 
+## Derive the Record — never author it alongside the work
+
+**A record kept in parallel with the thing it describes will drift.** Nothing forces the two to
+agree, so eventually they don't — and a drifted record is trusted right up until the moment it
+matters. A record *derived* from the work cannot drift, because there is only one source.
+
+Before writing any record by hand, ask: **what artifact already contains this fact?** Generate from
+that instead. If nothing contains it, that absence is the finding — add the artifact (a log line, a
+tag, a branch convention) so the record has a source.
+
+- **Changelogs** come from the commit range between release tags, not from what you remember
+  intending. Two entries in the corelib 0.5.5.0 changelog were untrue because they were authored
+  rather than derived — if you did not write the code, confirm the entry with whoever did.
+- **Status and progress** come from git — branch, tag, diff, log. Do not hand-maintain a parallel
+  account of what has landed.
+- **Metrics come from the same place.** Where a convention holds — e.g. nothing lands on a release
+  branch except hotfixes — that branch's history *is* the incident log, and its commit count *is*
+  the hotfix rate. The convention is the schema; no annotations required.
+- **Verifications** become capture suites (see above), not a sentence saying you checked.
+
+**Where you genuinely must author, make it immediate rather than batched.** The `## Documents`
+declaration exists precisely because nothing else records a doc artifact — which is why it is
+written in the same step as the doc, not collected up later.
+
 ## Spawned resources
 
 If you spawn anything that outlives one tool call (background process,

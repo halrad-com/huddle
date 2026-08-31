@@ -134,4 +134,88 @@ public class SessionWindowTests
     [InlineData("", false)]
     public void Console_hosts_are_recognised_case_insensitively(string process, bool expected) =>
         Assert.Equal(expected, SessionWindow.IsConsoleHost(process));
+
+    // --- PickWindowByPid: resolving a window for an ALREADY-RUNNING session ---
+    // A classic console window reports the console APP as its owning process
+    // (GetWindowThreadProcessId is special-cased for ConsoleWindowClass), so the
+    // window's PID equals the cmd.exe PID huddle tracks. Measured live 2026-08-31:
+    // window 5178116 -> pid 4852 (cmd) = huddle:architect's persisted pid.
+
+    private static WindowInfo Win(int handle, string process, string title, uint pid) =>
+        new(new IntPtr(handle), process, title, pid);
+
+    [Fact]
+    public void Pid_match_finds_the_window_of_a_recovered_session()
+    {
+        var candidates = new[]
+        {
+            Win(200, "cmd", "? Some conversation topic", 4852),
+            Win(210, "cmd", "? Another topic", 33976),
+        };
+
+        var hit = SessionWindow.PickWindowByPid(candidates, 33976, None);
+
+        Assert.Equal(new IntPtr(210), hit);
+    }
+
+    [Fact]
+    public void Pid_match_never_returns_a_claimed_window()
+    {
+        // A recycled PID could point at a window another session already holds.
+        var candidates = new[] { Win(220, "cmd", "topic", 4852) };
+
+        var hit = SessionWindow.PickWindowByPid(candidates, 4852, Handles(220));
+
+        Assert.Equal(IntPtr.Zero, hit);
+    }
+
+    [Fact]
+    public void Pid_match_returns_zero_when_windows_terminal_owns_the_window()
+    {
+        // WT owns its windows itself; no window carries the session's PID.
+        var candidates = new[]
+        {
+            Win(230, "WindowsTerminal", "? Conversation topic", 18964),
+        };
+
+        var hit = SessionWindow.PickWindowByPid(candidates, 33976, None);
+
+        Assert.Equal(IntPtr.Zero, hit);
+    }
+
+    [Fact]
+    public void Pid_zero_matches_nothing()
+    {
+        // Enumerated windows whose owner exited resolve to pid 0; a session with an
+        // unknown pid must not be handed one of those.
+        var candidates = new[] { Win(240, "cmd", "topic", 0) };
+
+        var hit = SessionWindow.PickWindowByPid(candidates, 0, None);
+
+        Assert.Equal(IntPtr.Zero, hit);
+    }
+
+    [Fact]
+    public void Pid_match_prefers_a_console_host_window()
+    {
+        // If the same process somehow owns a non-console window too (a dialog),
+        // the console window is the one focus should raise.
+        var candidates = new[]
+        {
+            Win(250, "someapp", "a dialog", 4852),
+            Win(260, "cmd", "? Conversation topic", 4852),
+        };
+
+        var hit = SessionWindow.PickWindowByPid(candidates, 4852, None);
+
+        Assert.Equal(new IntPtr(260), hit);
+    }
+
+    [Fact]
+    public void Old_windowinfo_shape_still_constructs()
+    {
+        // The 3-arg form (spawn-path tests, callers) defaults ProcessId to 0.
+        var w = Win(270, "cmd", "title");
+        Assert.Equal(0u, w.ProcessId);
+    }
 }

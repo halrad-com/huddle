@@ -1086,6 +1086,10 @@ exit 0
         Directory.CreateDirectory(logDir);
         _ = Task.Run(() => MonitorProcess(instance, proc, logDir));
 
+        // A recovered session has no spawn snapshot, but its console window still
+        // carries its PID — capture it so `focus` works across a huddle restart.
+        _ = Task.Run(() => TryCaptureWindowByPid(instance));
+
         SessionStateChanged?.Invoke(instance, SessionStatus.Running);
         return true;
     }
@@ -1225,6 +1229,26 @@ exit 0
 
             SessionStateChanged?.Invoke(instance, SessionStatus.Running);
         }
+
+        // The resumed console reports the adopted cmd.exe as its window's owner, so
+        // capture it by PID — polling briefly, because the window is being created
+        // right now. Restores `focus` for resumed sessions (the old gap: adopted
+        // sessions were tracked but had no captured window).
+        _ = Task.Run(() =>
+        {
+            var deadline = DateTime.UtcNow + WindowCaptureTimeout;
+            while (DateTime.UtcNow < deadline)
+            {
+                if (TryCaptureWindowByPid(instance)) return;
+                // IsAlive dereferences Process.HasExited, which throws once
+                // MonitorProcess disposes the exited proc — guard it, or a session
+                // that quits mid-poll faults this task.
+                try { if (!instance.IsAlive) return; }
+                catch { return; }
+                Thread.Sleep(WindowCapturePoll);
+            }
+            _log($"[{instance.InstanceId}] no console window found to focus after resume (session is unaffected).");
+        });
     }
 
     /// <summary>
@@ -1402,6 +1426,37 @@ exit 0
         catch (Exception ex)
         {
             _log($"[{instance.InstanceId}] window capture failed (continuing without): {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Locate the console window of an ALREADY-RUNNING session by its tracked PID —
+    /// the path for sessions huddle did not spawn this run (recovered after a huddle
+    /// restart, or adopted from a resume), which have no spawn-time snapshot to diff.
+    /// A classic console window reports the console app (the session's cmd.exe) as
+    /// its owner, so the PID huddle persists identifies it directly; when Windows
+    /// Terminal owns the windows nothing matches and this returns false (best-effort, same
+    /// contract as spawn-time capture). Safe to call any time — also used as the
+    /// lazy retry when `focus` finds no live handle on record.
+    /// </summary>
+    public bool TryCaptureWindowByPid(SessionInstance instance)
+    {
+        try
+        {
+            var proc = instance.Process;
+            if (proc == null || proc.HasExited) return false;
+
+            var hWnd = SessionWindow.PickWindowByPid(
+                SessionWindow.Enumerate(), (uint)proc.Id, ClaimedWindowHandles());
+            if (hWnd == IntPtr.Zero) return false;
+
+            lock (instance.Lock) instance.WindowHandle = hWnd;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log($"[{instance.InstanceId}] window lookup by pid failed (continuing without): {ex.Message}");
+            return false;
         }
     }
 
