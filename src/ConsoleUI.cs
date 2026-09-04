@@ -243,55 +243,26 @@ public class ConsoleUI
         Console.WriteLine();
     }
 
-    public void PrintHelp()
+    // Help renders FROM Verbs.Catalog (HelpView) — the hand-maintained list this
+    // method used to hold was a second source that drifted (the hodgepodge). Bare
+    // help = compact groups; 'help all' = grouped usage; 'help <verb>' = one usage.
+    public void PrintHelp(string arg = "")
     {
         try
         {
             Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine("Commands:");
-            Console.WriteLine("  start <repo> [persona] [prompt]  Launch an instance with optional task");
-            Console.WriteLine("  stop <instance|repo>     Stop a specific instance or all instances of a repo");
-            Console.WriteLine("  restart <instance>       Restart a specific instance (keeps persona)");
-            Console.WriteLine("  repos                    List registered repos and aliases");
-            Console.WriteLine("  personas                 List available personas");
-            Console.WriteLine("  status                   Show all instance statuses");
-            Console.WriteLine("  send <instance> <msg>    Send a message to a session's inbox");
-            Console.WriteLine("  say <instance> <text>    Inject a prompt directly into a session's console");
-            Console.WriteLine("  shell [<repo>] <data>    Hand <data> to the OS shell (file handler); optional repo sets CWD");
-            Console.WriteLine("  broadcast [@repo] <message>  Fan out a message to live sessions (optionally only repo's agents)");
-            Console.WriteLine("  messages <instance>      List messages in a session's inbox");
-            Console.WriteLine("  huddle <group>           Start all sessions in a group");
-            Console.WriteLine("  delegate \"desc\" to <inst>  Delegate a task to a session");
-            Console.WriteLine("  tasks                    Show tracked tasks");
-            Console.WriteLine("  scan                     Re-scan inbox for missed commands");
-            Console.WriteLine("  focus <instance|repo>    Bring a session's console window to the foreground (alias: goto)");
-            Console.WriteLine("  resume <instance>        Open 'claude --resume <session-id>' for a session in its repo root");
-            Console.WriteLine("  progress                 Show last checkpoint per session");
-            Console.WriteLine("  conflicts                Report file claim overlaps across sessions");
-            Console.WriteLine("  backlog                  Show undelivered/unread mail per session (alias: unread)");
-            Console.WriteLine("  janitor                  Report leaked session resources (resledger, B016)");
-            Console.WriteLine("  queue                    Show the work queue — active / queued (blocked on) / done / failed");
-            Console.WriteLine("  settings [key [value]]   Show or set huddle.json settings ('settings unset <key>' reverts to default)");
-            Console.WriteLine("  ledger [all|<id>|open|orphans]  The feature ledger (docs/ledger/); 'open' is every open item across repos, oldest first (--by-age is that default, spelled out)");
-            Console.WriteLine("  ledger accept <id>              Record acceptance. Refused unless delivered, and unless a Deliverable names its 'accepts' gate");
-            Console.WriteLine("  ledger drop <id> <why>          Stop a hierarchy item. The reason is required and is kept — dropped is a state, not a deletion");
-            Console.WriteLine("  ledger decline <id> [note]      Hand a task back. Cheap and recorded; started work is abandoned, not declined");
-            Console.WriteLine("  replay <repo> [host[:port]]  Run the repo's captured regression tests; optional cross-box DUT target");
-            Console.WriteLine("  docs [plans|churn] [@repo] [kw] [-1d/-1w]  List docs; @repo, kw=folder/title, -Nd/-Nw=time window");
-            Console.WriteLine("  open <n>                 Open the nth document from the last 'docs' listing");
-            Console.WriteLine("  history [@repo] [kw] [-1d/-1w]  List past sessions from transcripts; 'history <n>' for detail, 'resume <n>' to reopen");
-            Console.WriteLine("  find <kw> [@repo] [-1d/-1w]  Content search: docs, sessions, notes, mail — 'open <n>' / 'resume <n>' on the results");
-            Console.WriteLine("  recover [n|all|dismiss n]  List sessions lost to a crash and relaunch them show-and-pick");
-            Console.WriteLine("  projects [html [path]]   List projects; 'projects html' writes the status page (repro output demo)");
-            Console.WriteLine("  project <slug>           Project detail: artifacts, sprint, live sessions, claims");
-            Console.WriteLine("  handoffs [@repo] [n]     Who handed what to whom, newest first (auto-announced as they land)");
-            Console.WriteLine("  stats [<repo>] [--who] [--since 30d] [html]");
-            Console.WriteLine("                           Repo activity: movement, commits, who (exact/inferred), time, work, health");
-            Console.WriteLine("  direct <english task>    Hand a task to huddle:architect to plan + dispatch automatically");
-            Console.WriteLine("  quit                     Exit huddle, sessions keep running");
-            Console.WriteLine("  shutdown                 Stop all sessions and exit");
-            Console.WriteLine("  reload [/y]              (advanced) Rebuild huddle + relaunch; child sessions keep running (/y skips prompt)");
-            Console.WriteLine("  ver                      Show huddle version (branch, commit, build time)");
+            var a = arg.Trim();
+            IReadOnlyList<string> lines;
+            if (a.Length == 0)
+            {
+                Console.WriteLine("Commands (grouped; aliases still work):");
+                lines = HelpView.RenderCompact(Verbs.Catalog);
+            }
+            else if (a.Equals("all", StringComparison.OrdinalIgnoreCase))
+                lines = HelpView.RenderFull(Verbs.Catalog);
+            else
+                lines = HelpView.RenderVerb(Verbs.Catalog, a);
+            foreach (var line in lines) Console.WriteLine(line);
         }
         finally { Console.ResetColor(); }
     }
@@ -512,6 +483,10 @@ public class ConsoleUI
                 HandleConflicts();
                 break;
 
+            case "census":
+                HandleCensus(arg);
+                break;
+
             case "queue":
                 HandleQueue();
                 break;
@@ -571,7 +546,7 @@ public class ConsoleUI
                 break;
 
             case "help" or "h" or "?":
-                PrintHelp();
+                PrintHelp(arg);
                 break;
 
             default:
@@ -1034,7 +1009,7 @@ public class ConsoleUI
         _historyPageOffset = _lastHistory.Count;
 
         if (r.TranscriptsTruncated)
-            PrintDim($"  (newest {TranscriptStore.MaxScan} transcripts scanned)");
+            PrintDim($"  (newest {_manager.Config.Settings.Int("transcriptMaxScan")} transcripts scanned)");
         Log($"{total} hit(s) for '{keyword}'. 'open <n>' to open, 'resume <n>' to reopen a session.");
     }
 
@@ -2022,7 +1997,8 @@ public class ConsoleUI
         var projectsRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "projects");
         var roots = _manager.Repos.ToDictionary(kv => kv.Key, kv => kv.Value.Root, StringComparer.OrdinalIgnoreCase);
-        return new TranscriptStore(projectsRoot, roots, Log);
+        return new TranscriptStore(projectsRoot, roots, Log,
+            _manager.Config.Settings.Int("transcriptMaxScan"));
     }
 
     private void HandleHistory(string arg)
@@ -2085,7 +2061,7 @@ public class ConsoleUI
         if (repoFilter != null) summary += $" in {repoFilter}";
         if (keyword.Length > 0) summary += $" matching '{keyword}'";
         if (window != null) summary += $" in the last {window}";
-        if (store.LastListTruncated) summary += $" (newest {TranscriptStore.MaxScan} transcripts scanned)";
+        if (store.LastListTruncated) summary += $" (newest {store.MaxScan} transcripts scanned)";
         Log($"{summary}. 'history <n>' for detail, 'resume <n>' to reopen.");
     }
 
@@ -3194,6 +3170,59 @@ public class ConsoleUI
             Log("No conflicts detected.");
         else
             Console.WriteLine();
+    }
+
+    // ---- `census` — the wiring gate (G5) -----------------------------------------
+    // Bare: run huddle's own settings census (same rules as WiringCensusTests) plus a
+    // cross-check that every exemption's ledger task is still OPEN — a deferral whose
+    // owner closed without wiring the key is exactly how transcriptMaxScan rotted.
+    // `census <repo>`: run that repo's configured censusCommand in its root.
+    private void HandleCensus(string arg)
+    {
+        var target = arg.Trim();
+        if (target.Length > 0)
+        {
+            var name = _manager.ResolveRepoName(target);
+            if (name == null || !_manager.Repos.TryGetValue(name, out var def))
+            { Log($"census: unknown repo '{target}'"); return; }
+            if (string.IsNullOrWhiteSpace(def.CensusCommand))
+            { Log($"census: repo '{name}' has no censusCommand in huddle.json — its census runs in its own test suite"); return; }
+            var r = CaptureReplay.RunCommand(def.CensusCommand!, def.Root, Log);
+            Log(r.Ran
+                ? (r.Failed == 0 ? $"census {name}: CLEAN" : $"census {name}: {r.Failed} finding(s)")
+                : $"census {name}: command did not run");
+            return;
+        }
+
+        var root = Path.GetDirectoryName(Path.GetFullPath(ConfigPath)) ?? ".";
+        if (!File.Exists(Path.Combine(root, "src", "Settings.cs")))
+        { Log($"census: huddle sources not found beside {ConfigPath} — run from the repo, or use census <repo>"); return; }
+
+        var report = WiringCensus.RunLive(root);
+        foreach (var o in report.Orphans) Log($"census: ORPHAN — setting '{o}' has no reader (wire it or exempt it with a ledger task)");
+        foreach (var b in report.BadExemptions) Log($"census: BAD EXEMPTION — {b}");
+        foreach (var s in report.StaleExemptions) Log($"census: STALE EXEMPTION — {s}");
+
+        // Exemption -> ledger cross-check: the id must still be an OPEN item somewhere.
+        var exemptionsPath = Path.Combine(root, "wiring-exemptions.txt");
+        var pairs = File.Exists(exemptionsPath)
+            ? WiringCensus.ExemptionLedgerIds(File.ReadAllLines(exemptionsPath))
+            : Array.Empty<(string, string)>();
+        if (pairs.Count > 0)
+        {
+            var snaps = _manager.Repos.Select(kv => LedgerView.Load(kv.Key, kv.Value.Root)).ToList();
+            var openIds = new HashSet<string>(
+                LedgerView.OpenByAge(snaps, DateTimeOffset.Now).Select(i => i.Id),
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var (key, id) in pairs)
+                if (!openIds.Contains(id))
+                    Log($"census: DEAD DEFERRAL — exemption '{key}' names ledger task {id}, which is not open: the owner shipped without wiring it");
+        }
+
+        var clean = report.Orphans.Count == 0 && report.BadExemptions.Count == 0 && report.StaleExemptions.Count == 0;
+        Log(clean
+            ? $"census huddle: CLEAN — {SettingsCatalog.All.Count} settings all wired or ledgered ({pairs.Count} exemption(s))"
+            : "census huddle: findings above — the same check gates the build in WiringCensusTests");
     }
 
     private void HandleQueue()

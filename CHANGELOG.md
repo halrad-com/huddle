@@ -13,7 +13,75 @@ is the source of truth, the handle is just for reading.
 day: start a new day block at the top of the file. Never rewrite a shipped entry.
 History from before this file lives in the git commit log.
 
+## 2026-09-03
+
+### 2026-09-03.1 — The shell entry registers itself — (commit below)
+
+`--register` was a command nobody discovers, so the normal outcome was an
+orchestrator that never appeared in the Start menu — exactly what happened on the
+author's own machine: Start-search found `publish\huddle.exe` as a raw indexed file
+hit, with no icon and no working directory, and launching it did nothing useful.
+
+Startup now checks the shell entry and writes it when it is absent or broken:
+nothing registered, the registered exe gone (the repo moved), the registered working
+directory gone, or the shortcut deleted. Healthy entries are left alone — including
+a healthy one pointing at a DIFFERENT exe, so a second clone never silently steals
+the Start-menu entry, and a build-output exe (`bin/` or `obj/` — `dotnet run`, a
+debug build) never claims it at all. Failures are logged, never fatal: huddle does
+not refuse to start over a shortcut.
+
+`--register` remains, now as the explicit override that points the entry at a
+specific exe. New `shellRegistration` setting (bool, default true) turns the whole
+thing off; `--unregister` says so, since otherwise the next launch undoes it.
+
 ## 2026-08-31
+
+### 2026-08-31.4 — Grouped help: structure instead of a 41-line hodgepodge — (commit below)
+
+`help` now renders FROM the verb catalog — the hand-maintained duplicate list in
+`PrintHelp` (a drift risk, and the wall itself) is deleted. Bare `help` is six
+frequency-ordered group lines (sessions / comms / insight / work / console / misc),
+names only; `help all` is the grouped full usage; `help <verb>` is one verb's
+grammar. Moving a verb between groups is a one-word catalog edit. Completion is
+unchanged — it still completes everything.
+
+### 2026-08-31.3 — Windows shell entry: `huddle --register` — (commit below)
+
+Start-search "huddle", pin it, Win+R it. `--register` (run from the repo root)
+creates a per-user Start-menu shortcut targeting the running exe with the repo root
+as working directory, registers the `HALRAD.Huddle` AUMID (stamped on the .lnk via
+IPropertyStore so pinning treats huddle as one app), and writes an App Paths entry
+so the bare name resolves from Win+R. The App Paths entry also records the repo
+root, and the config resolver uses it as a LAST fallback — a launch from a
+config-less cwd boots the registered huddle instead of first-run-templating a
+config into a random directory. `--unregister` reverses everything. No admin, no
+installer — ported from the proven MBXS `AppIdentity` prototype, minus Apps &
+Features and Run-at-logon (an orchestrator must not autostart).
+
+### 2026-08-31.2 — The wiring gate: shipped-but-unread features become a red build — `56cc312`, `d9a6f23`, + verb/persona commits
+
+A census found 22 features across huddle and LIB that shipped modeled, validated,
+documented — and read by nothing (evidence: `logs/workspace/2026-08-31-orphan-surface-census.md`;
+design: `docs/superpowers/specs/2026-08-31-wiring-gate-design.md`). Two were huddle's:
+
+- **`transcriptMaxScan` now governs behaviour.** It was a documented, settable knob
+  over a `const`; it now flows into `TranscriptStore` and caps `history`/`find`
+  scans, whose truncation footers print the real value. (Its description also
+  claimed `stats`, which never scanned transcripts — corrected to `history`/`find`.)
+- **`crashLogRetention` now prunes.** 0 keeps no crash logs; otherwise each crash
+  write prunes a session's `crash-*.log` files oldest-first to the cap.
+- **`WiringCensusTests` gates every build**: a `SettingsCatalog` key with no reader
+  outside the settings machinery fails the suite unless `wiring-exemptions.txt`
+  carries it with an OPEN ledger task id — deferrals get owners instead of rotting
+  in prose. Matching is word-boundary, case-insensitive (web clients read camelCase).
+  Its first live run flagged `autoRestart`/`maxAutoRestarts` and forced the
+  machinery-consumer refinement that made it honest.
+- **`census [repo]` verb**: runs the gate on demand; bare form checks huddle itself
+  plus dead-deferral detection against the feature ledger; a repo argument runs that
+  repo's `censusCommand`.
+- **Personas carry a new Definition of Done**: completion reports must trace each
+  user-facing claim `input file:line → reader file:line`; changelog bullets are
+  written from traces, never from the spec.
 
 ### 2026-08-31.1 — `focus` works on recovered and resumed sessions — `dcdd7b4`
 

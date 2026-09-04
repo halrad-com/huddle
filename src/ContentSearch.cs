@@ -108,7 +108,7 @@ public sealed class ContentSearch
             // cutoff-filtered a line later, so this can over-report truncation. It never
             // under-reports, which is the direction that matters — the footer must not
             // claim a complete scan when one was cut short.
-            if (scanned >= TranscriptStore.MaxScan) { truncated = true; break; }
+            if (scanned >= _transcripts.MaxScan) { truncated = true; break; }
             DateTime mtime;
             try { mtime = File.GetLastWriteTime(path); }
             catch (Exception ex) { _log($"find: skip transcript {Path.GetFileName(path)}: {ex.Message}"); continue; }

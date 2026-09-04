@@ -33,6 +33,29 @@ public static class ConfigPathResolver
         return Default;
     }
 
+    /// <summary>
+    /// Resolve with a last-resort registered-root fallback (shell registration): when
+    /// <paramref name="baseDir"/> holds neither huddle.json nor myapp.json and no
+    /// --config was given, a root recorded by `huddle --register` whose huddle.json
+    /// exists wins over returning a relative path — so a Win+R launch boots the
+    /// registered huddle instead of first-run-templating a config into a random cwd.
+    /// The lookup is injected for tests; pass <c>ShellRegistration.RegisteredRoot</c> live.
+    /// </summary>
+    public static string Resolve(string[] args, string baseDir, Func<string?> registeredRoot)
+    {
+        var resolved = Resolve(args, baseDir);
+        if (resolved != Default) return resolved;                       // --config or legacy won
+        if (File.Exists(Path.Combine(baseDir, Default))) return resolved; // cwd has a config
+
+        var root = registeredRoot();
+        if (!string.IsNullOrEmpty(root))
+        {
+            var candidate = Path.Combine(root, Default);
+            if (File.Exists(candidate)) return candidate;
+        }
+        return resolved;
+    }
+
     /// <summary>Resolve against the current working directory — the normal case.</summary>
     public static string Resolve(string[] args) => Resolve(args, Directory.GetCurrentDirectory());
 

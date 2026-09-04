@@ -28,7 +28,8 @@ public static class SettingsCatalog
         new SettingDef("gitActivityLog",          SettingKind.Bool, 0, 0,     SettingApplies.Startup, "true",   "append cred requests + movements to logs/git-activity.jsonl"),
         new SettingDef("gitPollSeconds",          SettingKind.Int,  1, 300,   SettingApplies.Startup, "5",      "git activity poll interval"),
         new SettingDef("taskAckMinutes",          SettingKind.Int,  1, 1440,  SettingApplies.Live,    "15",     "unacked task escalates after this"),
-        new SettingDef("transcriptMaxScan",       SettingKind.Int,  10, 1000, SettingApplies.Live,    "100",    "transcripts scanned by history / stats"),
+        new SettingDef("transcriptMaxScan",       SettingKind.Int,  10, 1000, SettingApplies.Live,    "100",    "transcripts scanned by history / find"),
+        new SettingDef("shellRegistration",       SettingKind.Bool, 0, 0,     SettingApplies.Startup, "true",   "keep the Start-menu entry registered and healed"),
     };
 
     private static readonly Dictionary<string, SettingDef> ByKey =

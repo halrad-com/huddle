@@ -51,7 +51,7 @@ What you won't get from a terminal full of `claude` tabs:
 
 ## Why Huddle
 
-- **Crash protection that resumes, not just restarts.** Huddle began life as *seatbelt*, a crash wrapper for Claude Code sessions — your seatbelt against AI whiplash. It grew into something better: crashed sessions are isolated so they can't take anything else down, and the work ledger + scratchpad convention means a restarted agent picks up mid-task *with its context*. Watch a crash, type `restart`, and it carries on where it left off.
+- **Crash protection that resumes, not just restarts.** Huddle began life as *myapp*, a crash wrapper for Claude Code sessions — your myapp against AI whiplash. It grew into something better: crashed sessions are isolated so they can't take anything else down, and the work ledger + scratchpad convention means a restarted agent picks up mid-task *with its context*. Watch a crash, type `restart`, and it carries on where it left off.
 - **Human console AND agent-to-agent coordination — both, not either.** Most tools pick headless AI-to-AI or a human dashboard. Huddle is a human operator's console over a live inter-agent mail system.
 - **Fully auditable AI-to-AI communication.** Every message between agents is a JSON file on disk — inspectable, greppable, replayable. No opaque channels.
 - **Capture-to-test replay engine.** Agents freeze their verifications into regression suites as they work; `replay <repo>` re-runs the accumulated suite against a live instance. Verification becomes an asset, not an event.
@@ -105,18 +105,26 @@ Claude Code session orchestrator
 No sessions launch automatically unless `autoStart: true` is set in the config. You choose what to open.
 
 ```
+> huddle --register             # optional: force the Start-menu + Win+R entry at this exe
 > repos                         # see what's registered, including aliases
 > personas                      # see available roles
 > start app architect           # launch architect in myapp (alias: app)
 > status                        # see what's running
 > direct clean up the auth flow # hand a task to huddle:architect; it plans + fires
 > conflicts                     # see which files are currently claimed
+> census                        # wiring gate: settings/features nothing reads
 > docs                          # list artifacts sessions created (clickable)
 > stop app:architect            # stop a specific session
 > shutdown                      # stop everything and exit
 ```
 
 `app` is an alias for `myapp`. Aliases work anywhere a repo name is accepted.
+
+Huddle puts itself in the Start menu the first time you run it, and repairs that entry
+on later runs if you move the repo or the shortcut goes missing — `huddle --register`
+only exists to force it at a specific exe. It never takes the entry over from another
+clone, and a build-output exe (`dotnet run`, a debug build) never claims it at all.
+Turn the whole thing off with `huddle --set shellRegistration false`.
 
 > Setting up a fresh clone? See the [First Run guide](docs/first-run.md) — prerequisites,
 > config from `template.json`, and how the same setup scales from one machine to several

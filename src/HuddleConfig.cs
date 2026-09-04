@@ -52,6 +52,13 @@ public class SessionDefinition
 
     [JsonPropertyName("replayWorkingDir")]
     public string? ReplayWorkingDir { get; set; }
+
+    /// <summary>
+    /// G5 (wiring gate): command the `census <repo>` verb runs in this repo's root —
+    /// typically its own wiring-census test filter. Read by ConsoleUI.HandleCensus.
+    /// </summary>
+    [JsonPropertyName("censusCommand")]
+    public string? CensusCommand { get; set; }
 }
 
 public class GroupMember

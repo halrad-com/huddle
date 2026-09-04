@@ -36,17 +36,22 @@ public class TranscriptStore
     // Newest-first parse cap: bounds a `history` call on a machine with years of
     // transcripts. Filters apply after parse, so a very narrow filter over a very
     // old session can miss — the listing footer makes the cap visible.
-    public const int MaxScan = 100;
+    public const int DefaultMaxScan = 100;
+
+    // H1 (wiring-gap): the `transcriptMaxScan` setting flows in here via the ctor;
+    // it was a documented knob over a const for two shipped builds.
+    public int MaxScan { get; }
 
     private readonly string _projectsRoot;
     private readonly IReadOnlyDictionary<string, string> _repoRoots; // name -> root
     private readonly Action<string> _log;
 
-    public TranscriptStore(string projectsRoot, IReadOnlyDictionary<string, string> repoRoots, Action<string>? log = null)
+    public TranscriptStore(string projectsRoot, IReadOnlyDictionary<string, string> repoRoots, Action<string>? log = null, int maxScan = DefaultMaxScan)
     {
         _projectsRoot = projectsRoot;
         _repoRoots = repoRoots;
         _log = log ?? (_ => { });
+        MaxScan = maxScan < 1 ? DefaultMaxScan : maxScan;
     }
 
     /// <summary>True when the last ListSessions hit the MaxScan cap (older transcripts unscanned).</summary>

@@ -13,7 +13,7 @@ public interface ICompleter
     string Hint(string input) => "";
 }
 
-public readonly record struct Verb(string Name, string Usage);
+public readonly record struct Verb(string Name, string Usage, string Group = "misc");
 
 public static class Verbs
 {
@@ -28,50 +28,97 @@ public static class Verbs
     // are not completion targets.
     public static IReadOnlyList<Verb> Catalog { get; } = new Verb[]
     {
-        new("status",    "status                   Show all sessions and their state"),
-        new("start",     "start <repo> [persona] [prompt]   Launch a session with an optional task"),
-        new("stop",      "stop <instance|repo>     Stop a session, or every session of a repo"),
-        new("restart",   "restart <instance>       Restart a session"),
-        new("resume",    "resume <instance>        Resume a stopped/crashed session"),
-        new("history",   "history [@repo] [kw] [-Nw]   Browse past sessions"),
-        new("find",      "find <kw> [@repo] [-Nw]  Search docs, sessions, notes, mail"),
-        new("recover",   "recover [n|all|dismiss n]   List/resume recoverable sessions"),
-        new("projects",  "projects [html [path]]   List projects; 'html' writes the status page"),
-        new("project",   "project <slug>           Show a project's detail"),
-        new("handoffs",  "handoffs [@repo] [n]     Recent agent-to-agent handoffs"),
-        new("stats",     "stats [<repo>] [--who] [--since 30d] [html]   Repo activity: movement, commits, who, time, work"),
-        new("personas",  "personas                 List available personas"),
-        new("repos",     "repos                    List registered repos"),
-        new("send",      "send <instance> <msg>    Queue mail into a session's inbox"),
-        new("say",       "say <instance> <text>    Inject a prompt into a session's console"),
+        new("status",    "status                   Show all sessions and their state", "sessions"),
+        new("start",     "start <repo> [persona] [prompt]   Launch a session with an optional task", "sessions"),
+        new("stop",      "stop <instance|repo>     Stop a session, or every session of a repo", "sessions"),
+        new("restart",   "restart <instance>       Restart a session", "sessions"),
+        new("resume",    "resume <instance>        Resume a stopped/crashed session", "sessions"),
+        new("focus",     "focus <instance|repo>    Raise a session's window", "sessions"),
+        new("recover",   "recover [n|all|dismiss n]   List/resume recoverable sessions", "sessions"),
+        new("backlog",   "backlog                  Per-session queued + unread mail", "sessions"),
+        new("say",       "say <instance> <text>    Inject a prompt into a session's console", "comms"),
+        new("send",      "send <instance> <msg>    Queue mail into a session's inbox", "comms"),
         // Matches the live grammar: ConsoleUI.ParseBroadcast takes the whole line
         // after the optional @repo CSV prefix as the message (the subject is
         // derived). Bare `broadcast <message>` reaches ALL live sessions.
-        new("broadcast", "broadcast [@repo[,repo]] <message>   Fan out a message to live sessions (bare = all)"),
-        new("shell",     "shell [<repo>] <data>    Hand data to the OS shell"),
-        new("messages",  "messages <instance>      List a session's inbox"),
-        new("huddle",    "huddle <group>           Start all sessions in a group"),
-        new("delegate",  "delegate \"desc\" to <inst>   Delegate a task"),
-        new("tasks",     "tasks                    List tracked tasks"),
-        new("progress",  "progress                 Session progress + ledger summary"),
-        new("conflicts", "conflicts                Show claim conflicts"),
-        new("queue",     "queue                    Show the work queue"),
-        new("settings",  "settings [key [value]]   Show or set huddle.json settings"),
-        new("ledger",    "ledger [all|<id>|open [--by-age]|orphans|accept <id>|drop <id> <why>|decline <id> [note]] [--repo <name>] [--owner <instance>]   The feature ledger"),
-        new("replay",    "replay <repo> [host[:port]]   Replay capture suites"),
-        new("docs",      "docs [plans|churn] [@repo] [kw] [-Nw]   List doc artifacts"),
-        new("open",      "open <n>                 Open a listed doc/result"),
-        new("reload",    "reload [/y]              Rebuild + relaunch huddle (/y skips the prompt)"),
-        new("direct",    "direct <task>            Auto-fire a task at the architect"),
-        new("scan",      "scan                     Scan orchestrator inbox now"),
-        new("janitor",   "janitor                  Clean stale mail / resources"),
-        new("backlog",   "backlog                  Per-session queued + unread mail"),
-        new("focus",     "focus <instance|repo>    Raise a session's window"),
-        new("quit",      "quit                     Exit huddle (sessions keep running)"),
-        new("shutdown",  "shutdown                 Stop all sessions and exit"),
-        new("ver",       "ver                      Show huddle version"),
-        new("help",      "help                     Show command help"),
+        new("broadcast", "broadcast [@repo[,repo]] <message>   Fan out a message to live sessions (bare = all)", "comms"),
+        new("direct",    "direct <task>            Auto-fire a task at the architect", "comms"),
+        new("messages",  "messages <instance>      List a session's inbox", "comms"),
+        new("delegate",  "delegate \"desc\" to <inst>   Delegate a task", "comms"),
+        new("handoffs",  "handoffs [@repo] [n]     Recent agent-to-agent handoffs", "comms"),
+        new("docs",      "docs [plans|churn] [@repo] [kw] [-Nw]   List doc artifacts", "insight"),
+        new("open",      "open <n>                 Open a listed doc/result", "insight"),
+        new("find",      "find <kw> [@repo] [-Nw]  Search docs, sessions, notes, mail", "insight"),
+        new("history",   "history [@repo] [kw] [-Nw]   Browse past sessions", "insight"),
+        new("stats",     "stats [<repo>] [--who] [--since 30d] [html]   Repo activity: movement, commits, who, time, work", "insight"),
+        new("projects",  "projects [html [path]]   List projects; 'html' writes the status page", "insight"),
+        new("project",   "project <slug>           Show a project's detail", "insight"),
+        new("conflicts", "conflicts                Show claim conflicts", "work"),
+        new("census",    "census [repo]            Wiring census: settings nothing reads", "work"),
+        new("ledger",    "ledger [all|<id>|open [--by-age]|orphans|accept <id>|drop <id> <why>|decline <id> [note]] [--repo <name>] [--owner <instance>]   The feature ledger", "work"),
+        new("queue",     "queue                    Show the work queue", "work"),
+        new("tasks",     "tasks                    List tracked tasks", "work"),
+        new("progress",  "progress                 Session progress + ledger summary", "work"),
+        new("replay",    "replay <repo> [host[:port]]   Replay capture suites", "work"),
+        new("settings",  "settings [key [value]]   Show or set huddle.json settings", "console"),
+        new("reload",    "reload [/y]              Rebuild + relaunch huddle (/y skips the prompt)", "console"),
+        new("ver",       "ver                      Show huddle version", "console"),
+        new("help",      "help [all|<verb>]        Grouped help; 'all' = full usage, <verb> = one usage", "console"),
+        new("quit",      "quit                     Exit huddle (sessions keep running)", "console"),
+        new("shutdown",  "shutdown                 Stop all sessions and exit", "console"),
+        new("shell",     "shell [<repo>] <data>    Hand data to the OS shell", "misc"),
+        new("huddle",    "huddle <group>           Start all sessions in a group", "misc"),
+        new("janitor",   "janitor                  Clean stale mail / resources", "misc"),
+        new("scan",      "scan                     Scan orchestrator inbox now", "misc"),
+        new("personas",  "personas                 List available personas", "misc"),
+        new("repos",     "repos                    List registered repos", "misc"),
     };
+}
+
+/// <summary>
+/// Help rendered FROM the verb catalog — one source, so help can never drift from
+/// completion or the dispatch switch the way the hand-maintained PrintHelp list did.
+/// Compact = one line per group (names only); Full = grouped usage lines;
+/// Verb = one usage line. Spec 2026-08-31-shell-registration-design.md section 4.
+/// </summary>
+public static class HelpView
+{
+    // Frequency-ordered: daily groups first, scenario plumbing last.
+    public static readonly string[] GroupOrder = { "sessions", "comms", "insight", "work", "console", "misc" };
+
+    public static IReadOnlyList<string> RenderCompact(IReadOnlyList<Verb> catalog)
+    {
+        var lines = new List<string>();
+        foreach (var g in GroupOrder)
+        {
+            var names = catalog.Where(v => v.Group == g).Select(v => v.Name);
+            lines.Add($"{g,-10} {string.Join(" · ", names)}");
+        }
+        lines.Add("");
+        lines.Add("help <verb> for usage · help all for the full list");
+        return lines;
+    }
+
+    public static IReadOnlyList<string> RenderFull(IReadOnlyList<Verb> catalog)
+    {
+        var lines = new List<string>();
+        foreach (var g in GroupOrder)
+        {
+            lines.Add($"[{g}]");
+            foreach (var v in catalog.Where(v => v.Group == g))
+                lines.Add("  " + v.Usage);
+            lines.Add("");
+        }
+        return lines;
+    }
+
+    public static IReadOnlyList<string> RenderVerb(IReadOnlyList<Verb> catalog, string name)
+    {
+        var v = catalog.FirstOrDefault(v => string.Equals(v.Name, name, StringComparison.OrdinalIgnoreCase));
+        return v.Name != null
+            ? new[] { "  " + v.Usage }
+            : new[] { $"help: unknown verb '{name}' — 'help all' lists everything" };
+    }
 }
 
 public sealed class VerbCompleter : ICompleter

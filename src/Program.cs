@@ -59,6 +59,14 @@ class Program
         // Direct ledger access. These modes run the binary only - no running huddle,
         // no orchestrator round-trip - so an agent can claim, release and read the
         // ledger whether or not the console is up.
+        // Windows shell entry (spec 2026-08-31-shell-registration-design.md): Start-menu
+        // shortcut + AUMID + App Paths, per-user, idempotent. Runs the binary only.
+        if (args.Length >= 1 && args[0] == "--register")
+            return ShellRegistration.RunRegister(args, Console.WriteLine);
+
+        if (args.Length >= 1 && args[0] == "--unregister")
+            return ShellRegistration.RunUnregister(Console.WriteLine);
+
         if (args.Length >= 1 && args[0] == "--claim")
             return LedgerCommands.RunClaim(args[1..], Environment.GetEnvironmentVariable, Console.WriteLine);
 
@@ -90,10 +98,20 @@ class Program
         // ApplicationIcon covers Explorer only; the live window needs WM_SETICON.
         ConsoleIcon.TrySet();
 
+        // Taskbar identity: mirror the prototype's process AUMID (the shortcut's
+        // embedded AUMID from --register is what actually shapes pinning).
+        ShellRegistration.TrySetProcessAumid();
+
         // Find config path — the shared resolver, so the console and `huddle --settings`
         // can never disagree about which file exists (S6). It applies the myapp.json
-        // fallback itself; the note below is the only thing this caller adds.
-        var configPath = ConfigPathResolver.Resolve(args);
+        // fallback itself, plus the registered-root fallback (a Start-menu/Win+R launch
+        // from a config-less cwd boots the registered repo); the note below is the only
+        // thing this caller adds.
+        var configPath = ConfigPathResolver.Resolve(args, Directory.GetCurrentDirectory(), ShellRegistration.RegisteredRoot);
+        if (Path.IsPathRooted(configPath)
+            && Path.GetFileName(configPath) == ConfigPathResolver.Default   // legacy fallback returns rooted myapp.json — not this
+            && !args.Contains("--config") && !args.Contains("-c"))
+            ConsoleUI.Log($"Config: registered root {Path.GetDirectoryName(configPath)}");
         if (Path.GetFileName(configPath) == ConfigPathResolver.Legacy)
             ConsoleUI.Log("Note: rename myapp.json to huddle.json");
 
@@ -224,6 +242,13 @@ class Program
         // (commands, session lifecycle, shutdown decisions) is also appended to
         // logs\huddle.log so an abnormal teardown is reconstructable afterward.
         ConsoleUI.SetLogFile(Path.Combine(dataDir, "huddle.log"));
+
+        // Shell entry, self-healing. --register is a command nobody discovers, so an
+        // orchestrator that is never in the Start menu is the normal outcome; make
+        // running it the registration. Writes only when absent or broken, never
+        // hijacks another clone's entry, never fails startup.
+        if (config.Settings.Bool("shellRegistration"))
+            ShellRegistration.EnsureRegistered(configDir, ConsoleUI.Log);
 
         // Create components
         var contextWriter = config.Settings.Bool("contextFile") ? new ContextWriter(dataDir, ConsoleUI.Log) : null;

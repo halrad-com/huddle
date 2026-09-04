@@ -1472,6 +1472,32 @@ exit 0
         return claimed;
     }
 
+    /// <summary>
+    /// H2 (wiring-gap): keep at most <paramref name="keep"/> newest crash-*.log files
+    /// in a session's log dir; delete the rest oldest-first. keep &lt;= 0 removes all.
+    /// Best-effort — a locked or vanished file is logged and skipped, never fatal.
+    /// </summary>
+    public static void PruneCrashLogs(string logDir, int keep, Action<string> log)
+    {
+        try
+        {
+            if (!Directory.Exists(logDir)) return;
+            var files = Directory.GetFiles(logDir, "crash-*.log")
+                .Select(p => new FileInfo(p))
+                .OrderByDescending(f => f.LastWriteTimeUtc)
+                .ToList();
+            foreach (var stale in files.Skip(Math.Max(0, keep)))
+            {
+                try { stale.Delete(); }
+                catch (Exception ex) { log($"Crash-log prune: could not delete {stale.Name}: {ex.Message}"); }
+            }
+        }
+        catch (Exception ex)
+        {
+            log($"Crash-log prune failed for {logDir}: {ex.Message}");
+        }
+    }
+
     private void MonitorProcess(SessionInstance instance, Process proc, string logDir)
     {
         // Diagnostics — capture every detail of the exit so we can tell
@@ -1561,6 +1587,12 @@ exit 0
                      $"[source={codeSource}, HasExited={hasExited}, statusAtEntry={statusAtEntry}, " +
                      $"waitEx={waitException ?? "none"}, exitCodeEx={exitCodeException ?? "none"}]");
 
+                // H2 (wiring-gap): crashLogRetention governs how many crash logs a
+                // session keeps. 0 = keep none (skip the write); otherwise write then
+                // prune oldest-first down to the cap. The setting was settable and
+                // validated for two shipped builds while nothing pruned anything.
+                var crashLogKeep = _config.Settings.Int("crashLogRetention");
+                if (crashLogKeep > 0)
                 try
                 {
                     var crashFile = Path.Combine(logDir, $"crash-{DateTime.Now:yyyyMMdd-HHmmss}.log");
@@ -1592,6 +1624,9 @@ exit 0
                 {
                     _log($"Failed to write crash log: {ex.Message}");
                 }
+                else
+                    _log($"Crash log skipped (crashLogRetention = 0) for '{instance.InstanceId}'.");
+                PruneCrashLogs(logDir, crashLogKeep, _log);
 
                 // Reset consecutive counter if uptime was >60s (sustained run)
                 if (uptime.TotalSeconds > 60)

@@ -172,6 +172,28 @@ what — that works with huddle up or down, with or without the CLI.
 **`nack:claim` no longer means contention** — it means the request was malformed (bad
 body, unknown repo, empty file list). Fix the request and resend.
 
+### Definition of Done — reachability, not assertion (the wiring gate)
+
+Born 2026-08-31: a census found **22 features shipped modeled, validated, documented,
+and read by nothing** — a station duration no client could set, a Similar Artists
+integration with zero call sites, config knobs whose descriptions promised behaviour
+that did not exist. Every one had green tests behind the half that existed. The rule:
+**done is derived from the code, never asserted by the author.**
+
+- A completion report for anything user-facing MUST carry a **Reachability** section:
+  each capability claimed → `input <file:line>` → `reader <file:line>`, or
+  `EXEMPT <ledger-task-id>`. The bare word "implemented" with no trace is non-compliant.
+- Changelog and doc bullets are written FROM those traces, never from the spec. If you
+  cannot name the surface where a user performs the action, the bullet does not ship.
+- A plan that adds a settable/persisted value MUST include (a) the task that wires the
+  consumer and (b) one behaviour test that changes the value and observes different
+  behaviour. Producer-half tests (store / validate / echo) prove nothing by themselves.
+- Deferring a consumer is allowed ONLY when the plan says so, and the deferral is an
+  exemption line naming an OPEN ledger task (`wiring-exemptions.txt` in huddle; your
+  repo's equivalent) — never prose. The repo's wiring-census test and the `census`
+  verb enforce this; a deferral whose owning task closes without wiring the key is
+  reported as a dead deferral, not forgotten.
+
 ### Before you say you are done
 
 **Report what you did NOT verify, unprompted.** "Edited but not built" is a legitimate

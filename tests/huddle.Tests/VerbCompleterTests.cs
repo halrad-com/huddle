@@ -51,8 +51,8 @@ public class VerbCompleterTests
         // ?, h, msg, unread, goto, rebuild, handoff, version) are excluded.
         // Adding a verb to that switch means adding it here and bumping this
         // count; this assertion is what makes forgetting the catalog a failure.
-        Assert.Equal(40, Verbs.Catalog.Count);
-        Assert.Equal(40, Verbs.Catalog.Select(v => v.Name).Distinct().Count());
+        Assert.Equal(41, Verbs.Catalog.Count);
+        Assert.Equal(41, Verbs.Catalog.Select(v => v.Name).Distinct().Count());
     }
 
     [Fact]
