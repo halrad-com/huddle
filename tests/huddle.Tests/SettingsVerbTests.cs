@@ -10,6 +10,21 @@ namespace Huddle.Tests;
 // unknown setting "unset".
 // S2 (review 2026-08-22): reload pre-validation caught only SettingsException, so a
 // trailing comma raised JsonException and killed huddle with children attached.
+/// <summary>
+/// Console.Out is PROCESS-GLOBAL and xUnit runs test classes in parallel, so two
+/// classes that both Console.SetOut race: each captures the other's output and one
+/// gets nothing. That produced a flake from 2026-08-28 on, failing a different test
+/// each run and passing on re-run — the signature of a shared-state race, not a bug
+/// in either test. Every class that redirects Console.Out joins this collection;
+/// xUnit never runs two classes of one collection concurrently.
+/// </summary>
+[CollectionDefinition(ConsoleOutCollection.Name, DisableParallelization = true)]
+public sealed class ConsoleOutCollection
+{
+    public const string Name = "console-out";
+}
+
+[Collection(ConsoleOutCollection.Name)]
 public class SettingsVerbTests
 {
     static (ConsoleUI ui, string path) Make(string json)

@@ -8,6 +8,8 @@ namespace Huddle.Tests;
 /// logger writes a drop without ever printing to stdout (which would break git's
 /// auth fall-through to GCM).
 /// </summary>
+// Redirects Console.Out — see ConsoleOutCollection (SettingsVerbTests.cs).
+[Collection(ConsoleOutCollection.Name)]
 public class GitActivityTests
 {
     // Raw reflog file line: "<old> <new> <name> <email> <unixts> <tz>\t<message>".
