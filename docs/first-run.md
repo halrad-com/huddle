@@ -27,6 +27,12 @@ the repo.
 - **Windows 10/11.**
 - **.NET 8 SDK** — `dotnet --version` should report 8.x. Huddle builds as a
   framework-dependent single-file exe, so the .NET 8 runtime must be present to run it.
+  Specifically the **Desktop** runtime (`Microsoft.WindowsDesktop.App`), not only the
+  base one: the peek overlay is a real window, because a live thumbnail is composited
+  by the desktop manager into a window handle and cannot live inside anything else.
+  The SDK includes it, so anyone who can build huddle already has it; it matters only
+  if you copy the published exe to a machine that has just the base runtime.
+  `dotnet --list-runtimes` should show a `Microsoft.WindowsDesktop.App 8.x` line.
 - **Claude Code** installed and on `PATH` (`claude --version`). Huddle launches `claude`
   per session.
 - *(Optional)* PowerShell 7 (`pwsh`) for the statusline; Windows PowerShell works too.

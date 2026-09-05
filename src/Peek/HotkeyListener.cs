@@ -73,7 +73,7 @@ public sealed class HotkeyListener : IPeekHotkey
             HotkeyWindow? window = null;
             try
             {
-                window = new HotkeyWindow(onPressed);
+                window = new HotkeyWindow(onPressed, log);
                 _window = window;
                 if (RegisterHotKey(window.Handle, HotkeyId, modifiers | MOD_NOREPEAT, virtualKey))
                     Registered = true;
@@ -177,10 +177,12 @@ public sealed class HotkeyListener : IPeekHotkey
     private sealed class HotkeyWindow : Form
     {
         private readonly Action _onPressed;
+        private readonly Action<string> _log;
 
-        public HotkeyWindow(Action onPressed)
+        public HotkeyWindow(Action onPressed, Action<string> log)
         {
             _onPressed = onPressed;
+            _log = log;
             // Never shown: created only to own a window handle that can receive WM_HOTKEY.
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -194,7 +196,16 @@ public sealed class HotkeyListener : IPeekHotkey
         {
             if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == HotkeyId)
             {
-                try { _onPressed(); } catch { /* a failed summon must not kill the message loop */ }
+                // A failed summon must not kill the message loop, but it must not vanish
+                // either: PeekController has its own catch-all, so anything reaching here
+                // came from outside it and would otherwise be the one unreportable failure
+                // on the hotkey path.
+                try { _onPressed(); }
+                catch (Exception ex)
+                {
+                    try { _log($"peek hotkey: the summon threw {ex.GetType().Name}: {ex.Message}"); }
+                    catch { /* nothing left to report it with */ }
+                }
 
                 // The summon above is synchronous — PeekController shows the overlay and
                 // joins its UI thread — so this pump is stopped for as long as the overlay

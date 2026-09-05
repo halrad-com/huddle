@@ -13,8 +13,14 @@ namespace Huddle;
 ///
 /// <para>Every registration is an OS resource. They are released on <see cref="Clear"/>
 /// and on <see cref="Dispose"/>, and the overlay clears on every hide, so a summon
-/// cannot leak one handle per tile. The DWM calls are injectable so that the balance
-/// is unit-testable without a desktop.</para>
+/// cannot leak one handle per tile. Registration and release are injectable so that the
+/// balance is unit-testable without a desktop.</para>
+///
+/// <para>Placement is NOT injected, so <see cref="Place"/> reaches the real
+/// <c>DwmUpdateThumbnailProperties</c> even under test, against a fabricated handle it
+/// duly refuses. Harmless, and the failure is caught and logged, but it is worth saying
+/// rather than implying the whole class is hermetic: the register/release balance is
+/// what the seam proves, not every call in the file.</para>
 ///
 /// <para>No failure here is silent. Every interop call that can fail reports through the
 /// injected <c>log</c>: a swallowed exception is how a struct-layout mistake turns into a
@@ -62,33 +68,46 @@ public sealed class ThumbnailHost : IDisposable
             // Distinguishing these matters: the first is routine, the second means the DWM
             // said no to a window we believed was alive, which is worth noticing.
             _log(source == IntPtr.Zero
-                ? "ThumbnailHost: no thumbnail — the source window was already gone (null handle)"
-                : $"ThumbnailHost: no thumbnail for window 0x{source.ToInt64():x} — the desktop window manager refused it");
+                ? "ThumbnailHost: no thumbnail: the source window was already gone (null handle)"
+                : $"ThumbnailHost: no thumbnail for window 0x{source.ToInt64():x}: the desktop window manager refused it");
             return false;
         }
 
         _handles.Add(handle);
         if (!Place(handle, bounds))
-            _log($"ThumbnailHost: thumbnail 0x{handle.ToInt64():x} is registered but unplaced — its tile will be blank");
+            _log($"ThumbnailHost: thumbnail 0x{handle.ToInt64():x} is registered but unplaced, so its tile will be blank");
         return true;
     }
 
     public void Clear()
     {
+        // Report AFTER the release loop, never inside it. A log delegate that throws
+        // (the caller supplies it, and ConsoleUI.Log writes to a console handle that can
+        // die) would otherwise escape the foreach, skip the Clear below, and strand every
+        // handle after the failing one. Worse, the list would still be populated, so the
+        // next Clear would unregister the ones already released. Collect, then release
+        // the list, then talk.
+        var failures = new List<string>();
+
         foreach (var h in _handles)
         {
             try
             {
                 if (!_unregister(h))
-                    _log($"ThumbnailHost: releasing thumbnail 0x{h.ToInt64():x} failed — the handle is dropped, so this is the shape of a leak");
+                    failures.Add($"ThumbnailHost: releasing thumbnail 0x{h.ToInt64():x} failed, the handle is dropped, so this is the shape of a leak");
             }
             catch (Exception ex)
             {
                 // A thumbnail whose window died is already gone; keep releasing the rest.
-                _log($"ThumbnailHost: releasing thumbnail 0x{h.ToInt64():x} threw {ex.GetType().Name} — {ex.Message}");
+                failures.Add($"ThumbnailHost: releasing thumbnail 0x{h.ToInt64():x} threw {ex.GetType().Name}: {ex.Message}");
             }
         }
         _handles.Clear();
+
+        foreach (var f in failures)
+        {
+            try { _log(f); } catch { /* nothing left to report it with */ }
+        }
     }
 
     public void Dispose() => Clear();
@@ -125,7 +144,7 @@ public sealed class ThumbnailHost : IDisposable
         }
         catch (Exception ex)
         {
-            _log($"ThumbnailHost: placing thumbnail 0x{handle.ToInt64():x} threw {ex.GetType().Name} — {ex.Message}");
+            _log($"ThumbnailHost: placing thumbnail 0x{handle.ToInt64():x} threw {ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }
@@ -144,7 +163,7 @@ public sealed class ThumbnailHost : IDisposable
         {
             // Without this line a missing or broken dwmapi.dll is indistinguishable from a
             // source window that simply closed.
-            _log($"ThumbnailHost: DwmRegisterThumbnail threw {ex.GetType().Name} — {ex.Message}");
+            _log($"ThumbnailHost: DwmRegisterThumbnail threw {ex.GetType().Name}: {ex.Message}");
             return IntPtr.Zero;
         }
     }

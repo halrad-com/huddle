@@ -87,4 +87,15 @@ public class PeekChordTests
         Assert.False(PeekChord.TryParse("", out _, out _));
         Assert.False(PeekChord.TryParse("   ", out _, out _));
     }
+
+    // char.IsLetterOrDigit is Unicode-aware, so these used to parse and hand
+    // RegisterHotKey a virtual key that is not one: 0xC9 for the accented letter, 0x663
+    // for the Arabic-Indic digit. A chord that cannot possibly bind must be refused as
+    // unusable rather than registered and then reported as taken by another application.
+    [Theory]
+    [InlineData("Ctrl+Alt+é")]
+    [InlineData("Ctrl+Alt+٣")]
+    [InlineData("Ctrl+Alt+ß")]
+    public void Refuses_a_non_ascii_key(string chord)
+        => Assert.False(PeekChord.TryParse(chord, out _, out _));
 }

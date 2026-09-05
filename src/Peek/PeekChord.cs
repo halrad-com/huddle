@@ -63,7 +63,12 @@ public static class PeekChord
 
             if (virtualKey != 0) return false;   // two keys in one chord
 
-            if (part.Length == 1 && char.IsLetterOrDigit(part[0]))
+            // ASCII only, deliberately. char.IsLetterOrDigit is Unicode-aware, so it
+            // accepted things like Ctrl+é and handed RegisterHotKey a virtual key of
+            // 0xC9, which is not one. A chord that cannot work has to be refused here
+            // and reported as unusable, not registered and then blamed on another
+            // application. VK_A..VK_Z and VK_0..VK_9 are exactly the ASCII codes.
+            if (part.Length == 1 && (part[0] is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9'))
             {
                 virtualKey = char.ToUpperInvariant(part[0]);
                 continue;
