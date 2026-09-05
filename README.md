@@ -122,9 +122,13 @@ No sessions launch automatically unless `autoStart: true` is set in the config. 
 
 Huddle puts itself in the Start menu the first time you run it, and repairs that entry
 on later runs if you move the repo or the shortcut goes missing — `huddle --register`
-only exists to force it at a specific exe. It never takes the entry over from another
-clone, and a build-output exe (`dotnet run`, a debug build) never claims it at all.
-Turn the whole thing off with `huddle --set shellRegistration false`.
+only exists to force it at a specific exe. Two entries are made: **huddle** opens the
+console, and **Huddle Sessions** runs `huddle --peek`, which raises the thumbnail
+switcher over your running sessions (that is the one to pin to the taskbar). It never
+takes the entry over from another clone (the one exception is the first launch after
+upgrading to the build that adds Huddle Sessions, which re-registers because no earlier
+install has that shortcut), and a build-output exe (`dotnet run`, a debug build) never
+claims it at all. Turn the whole thing off with `huddle --set shellRegistration false`.
 
 > Setting up a fresh clone? See the [First Run guide](docs/first-run.md) — prerequisites,
 > config from `template.json`, and how the same setup scales from one machine to several
@@ -295,6 +299,7 @@ Run `help` in huddle for the live version. Current commands:
 | `resume <instance\|n>` | Reopen a stopped session's conversation (`claude --resume`) in its repo root, adopted back into the roster as a live session (so its file claims are never mistaken for orphans). Refuses live sessions. A transcript that belongs to no tracked instance is launched but not adopted — it cannot claim. |
 | `backlog` | Per-session queued wake lines + unread mail, oldest first — who is sitting on what. |
 | `focus <instance>` | Raise a session's console window (handle captured at spawn). |
+| `peek` | Thumbnail switcher over every running session: arrows or Tab to move, Enter to switch, Esc to cancel. Also on a global chord (`peekHotkey`: unset, huddle binds the first free of `Win+Alt+H`, `Ctrl+Alt+F12`, `Ctrl+Alt+F9`, `Ctrl+Alt+0` and says which at startup) and on the pinnable "Huddle Sessions" Start-menu shortcut. |
 | `recover [n\|all\|dismiss n]` | List sessions lost to a crash — persona, declared purpose, last evidence, hubs first — and relaunch them show-and-pick. Dismissals archive, never delete. |
 | `projects [html [path]]` | List projects discovered from `docs/projects/<slug>/` across repos (+ map overlay). `projects html` writes a self-contained status page — the reproducible output report. |
 | `project <slug>` | Project detail: goal, sprint, artifacts (wired into `open <n>`), live sessions, claims, recoverables. |
@@ -322,6 +327,7 @@ precisely so they keep working when huddle is not:
 | `huddle --set <key> <value>` | Validate and write one setting into `huddle.json`. Refuses unknown keys by name (with a did-you-mean) and out-of-range values with the range. |
 | `huddle --unset <key>` | Remove a setting, reverting it to the built-in default. |
 | `huddle --projects-html <out.html> [--config <path>]` | Render the projects status page headlessly and exit. |
+| `huddle --peek` | Raise the session switcher in the huddle already running for this config root, or start huddle if none is. What the "Huddle Sessions" shortcut runs. |
 | `huddle --config <path>` | Start normally against a specific config file. |
 
 `--inject` and `--cred-log` also exist but are internal — huddle spawns itself with them

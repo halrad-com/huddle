@@ -211,6 +211,17 @@ public class SessionWindowTests
         Assert.Equal(new IntPtr(260), hit);
     }
 
+    // IsLive answers only "does this handle exist", which is not enough for anything
+    // that means to raise a window: under Windows Terminal GetConsoleWindow returns a
+    // hidden zero-size pseudoconsole, a real window that passes IsLive. IsVisible is the
+    // second half of that gate. Only handles that need no desktop are asserted here.
+    [Fact]
+    public void A_zero_handle_is_neither_live_nor_visible()
+    {
+        Assert.False(SessionWindow.IsLive(IntPtr.Zero));
+        Assert.False(SessionWindow.IsVisible(IntPtr.Zero));
+    }
+
     [Fact]
     public void Old_windowinfo_shape_still_constructs()
     {

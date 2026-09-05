@@ -292,3 +292,31 @@ public class CommitAuditLiveClaimTests
         Assert.Empty(CommitAudit.Unclaimed(new[] { "myapp/MBXH/Core/CharmRegistry.cs" }, top, idx));
     }
 }
+
+public class ConsoleEncodingTests
+{
+    [Fact]
+    public void The_console_encoding_carries_no_preamble()
+    {
+        // A BOM is invisible on a real console and corrupts the first line the moment
+        // stdout is redirected to a file or a pipe - the same trap the claim journal hit.
+        Assert.Empty(ConsoleEncoding.Utf8NoBom.GetPreamble());
+        Assert.Equal(65001, ConsoleEncoding.Utf8NoBom.CodePage);
+    }
+
+    [Fact]
+    public void The_warning_glyph_survives_a_utf8_round_trip()
+    {
+        // The character the status row actually prints (U+26A0). Under the ANSI
+        // codepage this round-trips to "?", which is what the operator saw.
+        var note = Obligations.StatusNote(
+            new[] { new Obligation(new LedgerId(LedgerType.Task, 1, "repo1"), "repo1", "t", "assigned",
+                                   DateTimeOffset.Now.AddDays(-5)) },
+            DateTimeOffset.Now);
+
+        var bytes = ConsoleEncoding.Utf8NoBom.GetBytes(note);
+        Assert.Equal(note, ConsoleEncoding.Utf8NoBom.GetString(bytes));
+        Assert.Contains("⚠", note);
+        Assert.DoesNotContain("?", note);
+    }
+}

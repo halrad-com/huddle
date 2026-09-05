@@ -65,12 +65,20 @@ public class SessionInstance
     public string FormatUptime()
     {
         var up = Uptime;
-        if (up == null) return "";
-        if (up.Value.TotalHours >= 1)
-            return $"{(int)up.Value.TotalHours}h {up.Value.Minutes}m";
-        if (up.Value.TotalMinutes >= 1)
-            return $"{(int)up.Value.TotalMinutes}m {up.Value.Seconds}s";
-        return $"{(int)up.Value.TotalSeconds}s";
+        return up == null ? "" : FormatUptime(up.Value);
+    }
+
+    /// <summary>The same uptime wording for a span that is not a session's. The peek
+    /// overlay draws huddle's own console beside the sessions, and a second format for
+    /// the same line would read as a bug in whichever tile the operator looked at second.
+    /// </summary>
+    public static string FormatUptime(TimeSpan up)
+    {
+        if (up.TotalHours >= 1)
+            return $"{(int)up.TotalHours}h {up.Minutes}m";
+        if (up.TotalMinutes >= 1)
+            return $"{(int)up.TotalMinutes}m {up.Seconds}s";
+        return $"{(int)up.TotalSeconds}s";
     }
 
     /// <summary>

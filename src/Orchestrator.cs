@@ -37,7 +37,11 @@ public class Orchestrator : IDisposable
     // timer re-runs Scan() on an interval to recover anything the watcher
     // missed. The `scan` console verb does the same on demand. The interval is
     // configurable via huddle.json "rescanIntervalSeconds" (<=0 disables).
-    private Timer? _rescanTimer;
+    // Fully qualified: enabling WinForms for the peek overlay brings
+    // System.Windows.Forms.Timer into scope through the implicit usings, which makes a
+    // bare "Timer" ambiguous. The other timers in this codebase (IpcManager,
+    // GitActivityMonitor) already spell out System.Threading; this one now matches them.
+    private System.Threading.Timer? _rescanTimer;
     private int _rescanning; // 0/1 re-entrancy guard so a slow scan can't overlap itself
 
     // In-flight guard. A file can be handed to ProcessCommandFile by an FSW
@@ -153,7 +157,7 @@ public class Orchestrator : IDisposable
         if (rescanSeconds > 0)
         {
             var interval = TimeSpan.FromSeconds(rescanSeconds);
-            _rescanTimer = new Timer(_ => PeriodicRescan(), null, interval, interval);
+            _rescanTimer = new System.Threading.Timer(_ => PeriodicRescan(), null, interval, interval);
             _log($"Orchestrator: periodic inbox rescan every {rescanSeconds}s");
         }
         else

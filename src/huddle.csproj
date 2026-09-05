@@ -1,7 +1,28 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <!-- Windows-only by construction, and now declared as such. huddle reads the
+         registry, drives ConPTY, injects with WriteConsoleInput and builds Start-menu
+         shortcuts over COM. Under a bare net8.0 (a portable claim) every one of those
+         raised CA1416 - 40 warnings that were CORRECT: the declaration was the lie, not
+         the calls. Fixed by telling the truth rather than suppressing the analyser, so
+         the warning stays available to catch a genuinely non-portable mistake later. -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- The peek overlay is a real window: a DWM thumbnail is composited into a window
+         handle and cannot live inside a hosted document, which is why this is WinForms
+         and not a web view. In-box in the SDK, no package reference. Cost, accepted
+         knowingly (spec 2026-09-04-session-peek-design.md section 13): huddle now needs
+         the .NET Desktop Runtime where the base runtime used to be enough. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- Warnings cannot accumulate again. Forty CA1416s built up unnoticed because a
+         warning nobody has to act on is a warning everybody stops reading - the landmine
+         you forget about. Anything new breaks the build the moment it appears, when the
+         change that caused it is still in front of you.
+         Escape hatch, deliberately one visible line rather than a silent suppression: set
+         this false to unblock (e.g. an SDK upgrade adding a new analyser), fix the
+         warnings, set it back. Never add <NoWarn> for a specific rule without a comment
+         saying why the rule is wrong HERE. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RootNamespace>Huddle</RootNamespace>
     <AssemblyName>huddle</AssemblyName>
     <ImplicitUsings>enable</ImplicitUsings>

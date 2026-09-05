@@ -59,6 +59,25 @@ public static class ConfigPathResolver
     /// <summary>Resolve against the current working directory — the normal case.</summary>
     public static string Resolve(string[] args) => Resolve(args, Directory.GetCurrentDirectory());
 
+    /// <summary>
+    /// The identity of a huddle root as a short stable hash: full path, trailing separator
+    /// removed, lowercased, SHA-256, first 16 hex characters.
+    ///
+    /// <para>Every per-root kernel object name is built from this — the singleton mutex
+    /// (<c>Local\huddle-</c>, Program.Main) and the peek signal event
+    /// (<c>Local\huddle-peek-</c>, <see cref="PeekSignal.NameFor"/>). The recipe used to be
+    /// duplicated as source text in those two files with nothing pinning them together, and
+    /// a drift makes <c>huddle --peek</c> signal a name nobody is listening on and then
+    /// start a second huddle the mutex refuses. Same reason the config scan itself lives
+    /// here (S6): two copies of one rule is one copy too many.</para>
+    /// </summary>
+    public static string RootHash(string configDir)
+    {
+        var rootKey = Path.GetFullPath(configDir).TrimEnd(Path.DirectorySeparatorChar).ToLowerInvariant();
+        return Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(rootKey)))[..16];
+    }
+
     /// <summary>True when <paramref name="arg"/> is the flag that consumes the next argument
     /// as a path. Callers skipping over the pair when collecting positionals use this so the
     /// rule lives in one place.</summary>

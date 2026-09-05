@@ -31,6 +31,15 @@ public static class SettingsCatalog
         new SettingDef("transcriptMaxScan",       SettingKind.Int,  10, 1000, SettingApplies.Live,    "100",    "transcripts scanned by history / find"),
         new SettingDef("shellRegistration",       SettingKind.Bool, 0, 0,     SettingApplies.Startup, "true",   "keep the Start-menu entry registered and healed"),
         new SettingDef("commitAudit",             SettingKind.Bool, 0, 0,     SettingApplies.Live,    "true",   "report commits touching files nobody claimed"),
+        // Live in the strongest sense in this catalog: setting it re-registers the chord on
+        // the running process through PeekHotkeySwitch, so it needs no reload at all.
+        //
+        // The Default column is the FIRST of PeekChord.Candidates, not the whole story: with
+        // the key unset huddle tries the list in order and binds the first Windows grants,
+        // and the startup log names the one it took. A column ten characters wide cannot
+        // hold four chords, and a display default that is a chord the operator can actually
+        // press beats one that is a sentence, so the list lives in the help text beside it.
+        new SettingDef("peekHotkey",              SettingKind.Text, 0, 0,     SettingApplies.Live,    "Win+Alt+H", "peek switcher chord; unset tries Win+Alt+H, Ctrl+Alt+0, Win+Ctrl+Alt+H in order"),
     };
 
     private static readonly Dictionary<string, SettingDef> ByKey =
@@ -236,7 +245,15 @@ public sealed class SettingsException : Exception
 
 public static class SettingsWriter
 {
-    static readonly JsonSerializerOptions WriteOpts = new() { WriteIndented = true };
+    // Relaxed escaping because huddle.json is hand-edited. The default encoder escapes
+    // '+' as +, which turned a chord the operator typed as Ctrl+Alt+F9 into
+    // "Ctrl+Alt+F9" in their config: still valid JSON, still parses back, and
+    // still unreadable to the person who has to edit it.
+    static readonly JsonSerializerOptions WriteOpts = new()
+    {
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
 
     public static bool TrySet(string configPath, string key, string raw, out string error, out SettingDef? def)
     {

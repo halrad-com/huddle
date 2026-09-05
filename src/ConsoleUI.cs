@@ -49,6 +49,12 @@ public class ConsoleUI
     /// writes and what `reload` re-validates. Set by Program.cs from its resolved path.</summary>
     public string ConfigPath { get; init; } = "huddle.json";
 
+    /// <summary>The live peek hotkey, so `settings peekHotkey &lt;chord&gt;` can re-register
+    /// it on this running process instead of waiting for a reload. Settable rather than
+    /// init-only because Program.cs builds the listener after the UI. Null when no listener
+    /// was created (tests), and the set path falls back to the generic message then.</summary>
+    public PeekHotkeySwitch? PeekHotkeys { get; set; }
+
     private IDocumentSource? _docSource;
     private readonly IDocumentOpener _docOpener = new ShellDocumentOpener();
     private List<DocumentEntry> _lastDocs = new();
@@ -209,8 +215,11 @@ public class ConsoleUI
                                 Console.ForegroundColor = ConsoleColor.Red;
                                 Console.Write($"  [!] API: {reason}");
                             }
+                            // One threshold, named once: PeekModel's doc comment claims the
+                            // status verb shares it, and a hardcoded 3 here made that claim
+                            // false the moment either side moved.
                             else if (SessionTrouble.LastActivity(tpath) is { } la
-                                     && DateTime.Now - la > TimeSpan.FromMinutes(3))
+                                     && DateTime.Now - la > TimeSpan.FromMinutes(PeekModel.IdleThresholdMinutes))
                             {
                                 Console.ForegroundColor = ConsoleColor.DarkGray;
                                 Console.Write($"  idle {(int)(DateTime.Now - la).TotalMinutes}m");
@@ -533,6 +542,10 @@ public class ConsoleUI
 
             case "focus" or "goto":
                 HandleFocus(arg);
+                break;
+
+            case "peek":
+                PeekController.Show(_manager, Ipc, Log);
                 break;
 
             case "quit" or "q" or "exit":
@@ -2271,7 +2284,23 @@ public class ConsoleUI
             var key = rest.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
             if (key == null) { Log("settings: usage — settings unset <key>"); return; }
             if (SettingsWriter.TryUnset(ConfigPath, key, out var uerr))
-                Log($"settings: unset {key} — reverts to default; takes effect on reload");
+            {
+                // peekHotkey applies its unset on the spot, exactly as its set path does.
+                // Unsetting is the operator's way out of a failed chord experiment, and
+                // sending them to `reload` for the one key that needs no reload made the
+                // feature's headline claim true going in and false coming out. Unset means
+                // "go back to letting huddle choose", so the candidate walk is what runs,
+                // and the switch's own message says which chord that landed on.
+                if (SettingsCatalog.TryGet(key, out var ud)
+                    && ud.Key.Equals("peekHotkey", StringComparison.OrdinalIgnoreCase)
+                    && PeekHotkeys != null)
+                {
+                    Log($"settings: unset {ud.Key} — back to the built-in candidate chords");
+                    PeekHotkeys.TrySetFirstAvailable(PeekChord.Candidates, out var unsetMessage);
+                    Log(unsetMessage);
+                }
+                else Log($"settings: unset {key} — reverts to default; takes effect on reload");
+            }
             else Log($"settings: refused — {uerr}");
             return;
         }
@@ -2280,15 +2309,42 @@ public class ConsoleUI
         {
             if (!SettingsCatalog.TryGet(head, out var d)) { Log($"settings: unknown setting \"{head}\""); return; }
             var r = _manager.Config.Settings.Get(d.Key);
+
+            // peekHotkey is the one key this process can change without a reload, so the
+            // startup-loaded config is NOT the truth for it: after `settings peekHotkey X`
+            // the chord is X and the config object still says whatever it said at launch.
+            // Reporting that stale value is how an operator sets a chord, checks it, sees
+            // the old one and concludes the change failed. Ask the thing that owns it.
+            if (d.Key.Equals("peekHotkey", StringComparison.OrdinalIgnoreCase) && PeekHotkeys != null)
+            {
+                var bound = PeekHotkeys.Active ? PeekHotkeys.Chord : "nothing bound";
+                Log($"{d.Key} = {bound}  (live, {d.Kind})  {d.Help}");
+                return;
+            }
+
             Log($"{d.Key} = {r.Value}  ({r.Source}, {d.Applies}, {d.Kind}{(d.Kind == SettingKind.Int ? $" {d.Min}..{d.Max}" : "")})  {d.Help}");
             return;
         }
 
         // Even a Live setting only re-resolves when the config is reloaded — the
         // message says so rather than implying an effect that has not happened.
+        //
+        // peekHotkey is the one exception: the switch re-registers the chord on this
+        // process, so the reload wording would be plainly wrong for it. Its own message
+        // replaces the suffix, because only the switch knows whether the new chord was
+        // actually granted.
         if (SettingsWriter.TrySet(ConfigPath, head, rest, out var err, out var def))
-            Log($"settings: set {def!.Key} = {rest}" +
-                (def.Applies == SettingApplies.Startup ? " — takes effect on reload" : " — live on next read after reload"));
+        {
+            if (def!.Key.Equals("peekHotkey", StringComparison.OrdinalIgnoreCase) && PeekHotkeys != null)
+            {
+                Log($"settings: set {def.Key} = {rest}");
+                PeekHotkeys.TrySet(rest, out var hotkeyMessage);
+                Log(hotkeyMessage);
+            }
+            else
+                Log($"settings: set {def.Key} = {rest}" +
+                    (def.Applies == SettingApplies.Startup ? " — takes effect on reload" : " — live on next read after reload"));
+        }
         else Log($"settings: refused — {err}");
     }
 

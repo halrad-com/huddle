@@ -131,6 +131,19 @@ public static class SessionWindow
     /// <summary>True if the handle still refers to a live window.</summary>
     public static bool IsLive(IntPtr hWnd) => hWnd != IntPtr.Zero && IsWindow(hWnd);
 
+    /// <summary>
+    /// True if the window is visible on the desktop.
+    ///
+    /// <para>Weaker than it looks next to <see cref="IsLive"/>, and needed alongside it:
+    /// <see cref="IsLive"/> answers only "does this handle still exist". A Windows
+    /// Terminal pseudoconsole is a real, hidden, zero-size window, so it passes
+    /// <see cref="IsLive"/> and fails here. Any caller that means to RAISE a window
+    /// needs both, or it hands the operator a blank tile that does nothing when
+    /// committed. <see cref="Enumerate"/> applies this same filter, so every session
+    /// handle has already passed it; a handle from GetConsoleWindow has not.</para>
+    /// </summary>
+    public static bool IsVisible(IntPtr hWnd) => IsWindowVisible(hWnd);
+
     /// <summary>Enumerate visible, titled top-level windows with their owning process.</summary>
     public static List<WindowInfo> Enumerate()
     {

@@ -33,7 +33,10 @@ Say "Building huddle..."
 if ($LASTEXITCODE -ne 0) { Fail "dotnet build failed (exit $LASTEXITCODE)" }
 
 # The csproj targets a RID, so output lands under a win-x64 subdir. Find it robustly.
-$BinRoot = Join-Path $RepoRoot 'src\bin\Debug\net8.0'
+# Rooted at bin\Debug rather than a target-framework folder: the TFM moved once already
+# (net8.0 -> net8.0-windows, to declare the Windows-only truth and clear CA1416), and a
+# hardcoded TFM turns that into a broken script nobody notices until the demo is run.
+$BinRoot = Join-Path $RepoRoot 'src\bin\Debug'
 $Exe = Get-ChildItem -Path $BinRoot -Recurse -Filter 'huddle.exe' -ErrorAction SilentlyContinue |
        Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 $Dll = Get-ChildItem -Path $BinRoot -Recurse -Filter 'huddle.dll' -ErrorAction SilentlyContinue |

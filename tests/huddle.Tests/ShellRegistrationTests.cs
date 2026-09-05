@@ -15,6 +15,11 @@ public class ShellRegistrationTests
         Assert.Equal(@"C:\repos\huddle", p.WorkingDir);
         Assert.EndsWith(@"\Programs\huddle.lnk", p.ShortcutPath);
         Assert.Contains(@"Start Menu", p.ShortcutPath);
+        // The pinnable one. This literal is the user-visible contract: an operator pins
+        // "Huddle Sessions" to the taskbar, and a rename here breaks that pin silently.
+        // Its `--peek` argument is set in Apply, not Plan, so the argument itself stays
+        // operator-smoked by design; the filename does not have to be.
+        Assert.EndsWith(@"\Programs\Huddle Sessions.lnk", p.SwitcherShortcutPath);
     }
 
     [Fact]
@@ -85,6 +90,7 @@ public class ShellRegistrationHealthTests
         string currentExe = Exe, string[]? existingFiles = null, string[]? existingDirs = null)
         => ShellRegistration.CheckHealth(
             currentExe, registeredExe, registeredWorkingDir, shortcutExists,
+            switcherShortcutExists: true,
             p => (existingFiles ?? new[] { Exe }).Contains(p, StringComparer.OrdinalIgnoreCase),
             p => (existingDirs ?? new[] { Root }).Contains(p, StringComparer.OrdinalIgnoreCase));
 
@@ -142,6 +148,40 @@ public class ShellRegistrationHealthTests
         var c = Check(other, @"D:\clone", shortcutExists: true,
             existingFiles: new[] { Exe, other }, existingDirs: new[] { Root, @"D:\clone" });
         Assert.False(c.ShouldRegister);
+    }
+
+    // The second shortcut is the operator's actual route in: it is what gets pinned to
+    // the taskbar. A missing one has to heal exactly like a missing first one, or an
+    // upgrade from a build that predates it never grows the button.
+    [Fact]
+    public void A_missing_switcher_shortcut_is_healed()
+    {
+        var health = ShellRegistration.CheckHealth(
+            currentExePath: @"C:\repos\myapp\publish\huddle.exe",
+            registeredExe: @"C:\repos\myapp\publish\huddle.exe",
+            registeredWorkingDir: @"C:\repos\myapp",
+            shortcutExists: true,
+            switcherShortcutExists: false,
+            fileExists: _ => true,
+            dirExists: _ => true);
+
+        Assert.True(health.ShouldRegister);
+        Assert.Contains("switcher", health.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void With_both_shortcuts_present_nothing_is_rewritten()
+    {
+        var health = ShellRegistration.CheckHealth(
+            currentExePath: @"C:\repos\myapp\publish\huddle.exe",
+            registeredExe: @"C:\repos\myapp\publish\huddle.exe",
+            registeredWorkingDir: @"C:\repos\myapp",
+            shortcutExists: true,
+            switcherShortcutExists: true,
+            fileExists: _ => true,
+            dirExists: _ => true);
+
+        Assert.False(health.ShouldRegister);
     }
 
     [Theory]

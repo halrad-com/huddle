@@ -23,6 +23,7 @@ public static class ShellRegistration
     /// <summary>Everything a registration will write, computed pure for tests.</summary>
     public sealed record RegistrationPlan(
         string ExePath, string WorkingDir, string ShortcutPath,
+        string SwitcherShortcutPath,
         string AumidKeyPath, string AppPathsKeyPath);
 
     public static RegistrationPlan Plan(string exePath, string workingDir) => new(
@@ -31,6 +32,11 @@ public static class ShellRegistration
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),
             "Programs", "huddle.lnk"),
+        // The pinnable one. Separate entry rather than a second target on the same
+        // shortcut, because pinning is per-shortcut and the operator pins this one.
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),
+            "Programs", "Huddle Sessions.lnk"),
         AumidKey,
         AppPathsKey);
 
@@ -53,6 +59,7 @@ public static class ShellRegistration
         var plan = Plan(exePath, Path.GetDirectoryName(configPath)!);
         Apply(plan, log);
         log($"registered: Start menu 'huddle' -> {plan.ExePath}");
+        log($"            Start menu 'Huddle Sessions' -> {plan.ExePath} --peek  (pin this one)");
         log($"  working dir: {plan.WorkingDir}");
         log("  Win+R / shell 'huddle' resolves via App Paths; re-run --register after moving the repo");
         return 0;
@@ -63,11 +70,13 @@ public static class ShellRegistration
         var plan = Plan("unused", "unused");
         try { if (File.Exists(plan.ShortcutPath)) File.Delete(plan.ShortcutPath); }
         catch (Exception ex) { log($"unregister: could not remove shortcut: {ex.Message}"); }
+        try { if (File.Exists(plan.SwitcherShortcutPath)) File.Delete(plan.SwitcherShortcutPath); }
+        catch (Exception ex) { log($"unregister: could not remove switcher shortcut: {ex.Message}"); }
         try { Registry.CurrentUser.DeleteSubKeyTree(AumidKey, throwOnMissingSubKey: false); }
         catch (Exception ex) { log($"unregister: could not remove AUMID key: {ex.Message}"); }
         try { Registry.CurrentUser.DeleteSubKeyTree(AppPathsKey, throwOnMissingSubKey: false); }
         catch (Exception ex) { log($"unregister: could not remove App Paths key: {ex.Message}"); }
-        log("unregistered: Start-menu shortcut, AUMID and App Paths entries removed");
+        log("unregistered: Start-menu shortcuts, AUMID and App Paths entries removed");
         log("  huddle re-registers itself on startup — to keep it off, run: huddle --set shellRegistration false");
         return 0;
     }
@@ -114,7 +123,8 @@ public static class ShellRegistration
     /// </summary>
     public static HealthCheck CheckHealth(
         string currentExePath, string? registeredExe, string? registeredWorkingDir,
-        bool shortcutExists, Func<string, bool> fileExists, Func<string, bool> dirExists)
+        bool shortcutExists, bool switcherShortcutExists,
+        Func<string, bool> fileExists, Func<string, bool> dirExists)
     {
         if (IsBuildOutput(currentExePath)) return Healthy;
         if (string.IsNullOrEmpty(registeredExe))
@@ -123,6 +133,7 @@ public static class ShellRegistration
         if (string.IsNullOrEmpty(registeredWorkingDir) || !dirExists(registeredWorkingDir))
             return new(true, "registered working dir is gone");
         if (!shortcutExists) return new(true, "Start-menu shortcut missing");
+        if (!switcherShortcutExists) return new(true, "switcher shortcut missing");
         return Healthy;
     }
 
@@ -155,7 +166,8 @@ public static class ShellRegistration
             }
 
             var check = CheckHealth(exePath, registeredExe, registeredWorkingDir,
-                File.Exists(plan.ShortcutPath), File.Exists, Directory.Exists);
+                File.Exists(plan.ShortcutPath), File.Exists(plan.SwitcherShortcutPath),
+                File.Exists, Directory.Exists);
             if (!check.ShouldRegister) return;
 
             Apply(plan, log);
@@ -218,6 +230,19 @@ public static class ShellRegistration
                 shortcut.IconLocation = plan.ExePath + ",0";
                 shortcut.Save();
                 SetShortcutAumid(plan.ShortcutPath, Aumid);
+
+                var switcher = shell.CreateShortcut(plan.SwitcherShortcutPath);
+                try
+                {
+                    switcher.TargetPath = plan.ExePath;
+                    switcher.Arguments = "--peek";
+                    switcher.WorkingDirectory = plan.WorkingDir;
+                    switcher.Description = "Huddle sessions — thumbnail switcher";
+                    switcher.IconLocation = plan.ExePath + ",0";
+                    switcher.Save();
+                    SetShortcutAumid(plan.SwitcherShortcutPath, Aumid);
+                }
+                finally { Marshal.ReleaseComObject(switcher); }
             }
             finally { Marshal.ReleaseComObject(shortcut); }
         }

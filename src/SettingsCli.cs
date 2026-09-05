@@ -73,8 +73,7 @@ public static class SettingsCli
                     output($"refused: {err}");
                     return 1;
                 }
-                output($"set — {def!.Key} = {positional[1]}" +
-                       (def.Applies == SettingApplies.Startup ? " (takes effect on reload)" : ""));
+                output($"set — {def!.Key} = {positional[1]}{SetHint(def)}");
                 return 0;
 
             case "--unset":
@@ -88,7 +87,15 @@ public static class SettingsCli
                     output($"refused: {uerr}");
                     return 1;
                 }
-                output($"unset — {positional[0]} reverts to its built-in default");
+                // Same out-of-process truth as SetHint: the file changed, the running
+                // instance did not. peekHotkey's "built-in default" is a list of chords
+                // tried in order, so saying "default" alone would misdescribe what the
+                // operator just went back to.
+                var revertsTo = SettingsCatalog.TryGet(positional[0], out var ud)
+                    && ud.Key.Equals("peekHotkey", StringComparison.OrdinalIgnoreCase)
+                        ? "reverts to the built-in candidate chords"
+                        : "reverts to its built-in default";
+                output($"unset — {positional[0]} {revertsTo} (takes effect on reload)");
                 return 0;
 
             default:
@@ -96,6 +103,23 @@ public static class SettingsCli
                 return 1;
         }
     }
+
+    /// <summary>
+    /// What a written value does next, from OUT HERE.
+    ///
+    /// <para><c>Applies == Live</c> says the running orchestrator re-reads the value without
+    /// a restart. It does NOT say this process can reach that orchestrator, and it cannot:
+    /// <c>--set</c> is dispatched before the console starts, holds no switch and knows no
+    /// running instance. The old code printed the reload hint only for <c>Startup</c> keys,
+    /// so when <c>peekHotkey</c> became <c>Live</c> this path started printing a bare
+    /// confirmation for a chord that had not changed on the live instance, and the one line
+    /// that used to say so was gone. Every out-of-process write lands on reload; peekHotkey
+    /// adds the one shortcut that skips it, and names the verb that takes it.</para>
+    /// </summary>
+    static string SetHint(SettingDef def) =>
+        def.Key.Equals("peekHotkey", StringComparison.OrdinalIgnoreCase)
+            ? " (takes effect on reload, or immediately from `settings peekHotkey <chord>` inside a running huddle)"
+            : " (takes effect on reload)";
 
     static int List(string configPath, Action<string> output)
     {

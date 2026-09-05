@@ -13,7 +13,156 @@ is the source of truth, the handle is just for reading.
 day: start a new day block at the top of the file. Never rewrite a shipped entry.
 History from before this file lives in the git commit log.
 
+## 2026-09-05
+
+### 2026-09-05.2 — The peek hotkey binds on arrival — (commit below)
+
+The hotkey had never once bound on the operator's machine. `Ctrl+Alt+H` was taken there and
+`peekHotkey` was never written to `huddle.json`, so every start logged that the chord was
+taken and the feature shipped dead, recoverable only by guessing chords by hand.
+
+**A candidate list, not a single default.** With `peekHotkey` unset, huddle now tries
+`Win+Alt+H`, `Ctrl+Alt+F12`, `Ctrl+Alt+F9`, `Ctrl+Alt+0` in order and binds the first
+Windows grants, logging which one it took and how many it walked past
+(`peek hotkey: 'Ctrl+Alt+F9' is live (2 earlier candidates were already taken)`). Every
+candidate was probe-registered on a real desktop and measured free. A `peekHotkey` the
+operator wrote down is registered **alone** and never falls back: the discriminator is
+`ResolvedSetting.Source`, not the text, so deliberately setting the chord that happens to be
+the default is still a choice and is still honoured. If nothing binds, one line says so and
+names `settings peekHotkey <chord>` as the way out; huddle starts either way.
+
+**Acquisition belongs to `PeekHotkeySwitch`.** It takes the resolved setting and decides
+what to bind, handles "taken" as an input rather than an outcome it reports upward, and
+disposes anything that did not register. `Program.cs` asks for a hotkey and is told what it
+got: no candidate list, no retry, no conflict handling at the call site.
+
+**A listener that loses its chord no longer parks.** `HotkeyListener`'s failure branch used
+to fall through to `Application.Run()`, so a conflicted listener held a thread and a
+message-only window for the life of the process serving a hotkey that could never fire —
+which is what made a chord conflict terminal by construction. It now releases and ends its
+thread, so a walk over three taken chords still leaves one thread and one window. The same
+stand-down covers a listener whose constructor wait expired, which would otherwise have
+squatted on a chord nothing could release.
+
+Four narrower corrections in the same pass:
+
+- Re-setting the chord that is already live no longer blames a competitor that does not
+  exist. A chord is global to the desktop even though ids are per-window, so a second
+  registration of the same chord fails even when huddle owns it. Parsed chords are compared,
+  so `ctrl + alt + j` and `Ctrl + Alt + J` are recognised as one.
+- `settings unset peekHotkey` applies live, restarting the candidate walk, instead of
+  telling the operator to `reload` for the one key that needs no reload.
+- A successful swap no longer claims to have released a chord that was never registered.
+- `PeekHotkeySwitch.Dispose` latches a flag, so a `TrySet` after shutdown refuses rather
+  than binding a chord whose callback would summon into a half-dismantled huddle.
+
+`huddle --set <key> <value>` also says `takes effect on reload` for `live` keys again. That
+path runs before the console starts and holds no switch, so `live` never meant "live out
+here"; when `peekHotkey` became `live` the hint disappeared and a bare confirmation implied
+a change the running instance had not seen. `peekHotkey` names the verb that does apply it
+immediately.
+
+See [`docs/settings.md`](docs/settings.md#peekhotkey).
+
+### 2026-09-05.1 — The peek chord changes without a reload — (commit below)
+
+`settings peekHotkey <chord>` now re-registers the hotkey on the running process. The
+first live run of session peek reported `Ctrl+Alt+H` was already taken, and finding a
+chord no other application owns is inherently trial and error: every guess used to cost a
+full `reload`, which rebuilds and relaunches huddle with sessions attached.
+
+The new chord is registered **before** the old one is released, so a guess that loses
+costs nothing. An operator whose second and third attempts are also taken is left with the
+hotkey they already had, not with none. `HotkeyListener` now reports whether Windows
+actually granted the chord (`Registered`), which is what makes that decision possible;
+`PeekHotkeySwitch` owns the swap and hands back the one message the operator sees, naming
+the chord in each outcome and admitting when no chord is bound at all rather than claiming
+the old one still works. Two listeners coexist for the length of a swap, which is safe
+because `RegisterHotKey` scopes hotkey ids to a window handle and every listener owns its
+own message-only window.
+
+`peekHotkey` moves from `startup` to `live` in the settings catalog, and the set path
+prints the switch's message instead of the reload suffix, which would be wrong for this
+one key. Every other setting keeps its existing wording: this is not a general live-settings
+change, and the in-memory config is still the one loaded at startup.
+
+See [`docs/settings.md`](docs/settings.md#peekhotkey).
+
 ## 2026-09-04
+
+### 2026-09-04.6 — Session peek: a thumbnail switcher over the fleet — (commit below)
+
+**Session peek.** A transient overlay with a live thumbnail of every running session:
+arrows or Tab to move, Enter to switch, Esc to cancel. Reachable three ways: the `peek`
+verb, `Ctrl+Alt+H` (the `peekHotkey` setting), and a new pinnable "Huddle Sessions"
+Start-menu shortcut that runs `huddle --peek`. That last one starts huddle when none is
+running for the config root, so one pinned button is correct either way.
+
+Tiles carry what the shell never could: project, uptime, the `[!] API` trouble flag,
+idle time and unread mail. A session whose window huddle cannot identify is still drawn,
+but is not selectable and is skipped by the arrow keys, so the selection never rests on a
+tile Enter could not act on.
+
+The chord is operator-editable and validated: at least one modifier (`Ctrl`, `Alt`,
+`Shift`, `Win`) plus a letter, a digit or `F1` to `F24`. A modifier-less chord is
+refused, because a global hotkey with no modifier swallows that key in every application
+on the desktop. A chord another application already owns is named once at startup and
+then dropped; huddle carries on and the verb still works. Details in
+[`docs/settings.md`](docs/settings.md#peekhotkey).
+
+**Upgrading re-registers the Start-menu entry.** The startup self-heal now also checks
+for the "Huddle Sessions" shortcut, and no install from before this change has one, so
+the heal fires on the first launch of any build after this one. If you run huddle from
+more than one clone, the first clone launched after upgrading claims the Start-menu
+entry and the `App Paths` registration. Not by accident, as could happen before, but
+with near-certainty. It does not flap afterwards; ownership simply stays with whichever
+clone launched first until you re-run `huddle --register` from the one you meant. A
+one-time upgrade note, not a defect.
+
+The native taskbar flyout was tried first and does not work. The taskbar decides
+grouping when it creates a button, and for a classic console that button belongs to the
+console host rather than to the process huddle tracks, so an AppUserModelID applied
+afterwards has nothing to bite on. Evidence and the rejected alternative are in
+[`docs/superpowers/specs/2026-09-04-session-peek-design.md`](docs/superpowers/specs/2026-09-04-session-peek-design.md).
+
+### 2026-09-04.5 — Console output is UTF-8, so glyphs stop becoming "?" — (commit below)
+
+The warning sign on a status row rendered as a bare "?", and the operator read it as
+part of the message rather than as a dropped character — reasonably, since a status
+annotation that renders as punctuation looks like a bug in the thing being reported.
+
+Cause: .NET defaults console output to the system ANSI codepage, which has no code
+point for U+26A0 and transliterates it. Em-dashes were flattening to "-" the same way,
+which had been noticed on 2026-08-22 and written off as cosmetic.
+
+Set on the FIRST line of Main, not in the interactive path: every CLI verb returns long
+before the console loop, and the first attempt left `huddle --settings` still emitting
+"-". No BOM, deliberately — Encoding.UTF8 would prepend a preamble that corrupts the
+first line whenever stdout is redirected, the same trap the claim journal hit. When the
+console cannot be switched at all (no console attached) huddle says so once instead of
+leaving "?" unexplained.
+
+Verified on bytes rather than by eye: the published exe now emits E2 80 94 for an
+em-dash where it previously emitted 2D, with no preamble at the head of the stream.
+
+### 2026-09-04.4 — Zero warnings, and they cannot come back — (commit below)
+
+Forty CA1416 warnings had accumulated. Every one was CORRECT: huddle declared
+`net8.0` — a portable target — while reading the registry, driving ConPTY, injecting
+with WriteConsoleInput and building Start-menu shortcuts over COM. The declaration
+was the lie, not the calls, so the fix is `net8.0-windows` rather than a suppression.
+The analyser stays armed to catch a genuinely non-portable mistake later; suppressing
+CA1416 would have disarmed it permanently.
+
+`TreatWarningsAsErrors` now holds the line in both projects. A warning nobody has to
+act on is one everybody stops reading, which is how forty of them went unnoticed;
+anything new breaks the build while the change that caused it is still in front of
+you. The escape hatch is one visible line in the csproj, not a silent `NoWarn`.
+
+The test project follows the same target (a `net8.0` test project cannot reference a
+`net8.0-windows` library), and `scripts/demo-project-status.ps1` now globs from
+`bin\Debug` instead of a hardcoded framework folder — the exact thing that would have
+broken silently on this change.
 
 ### 2026-09-04.3 — Commit audit reads live claims, not just its own journal — (commit below)
 

@@ -34,6 +34,7 @@ public static class Verbs
         new("restart",   "restart <instance>       Restart a session", "sessions"),
         new("resume",    "resume <instance>        Resume a stopped/crashed session", "sessions"),
         new("focus",     "focus <instance|repo>    Raise a session's window", "sessions"),
+        new("peek",      "peek                     Thumbnail switcher over every running session", "sessions"),
         new("recover",   "recover [n|all|dismiss n]   List/resume recoverable sessions", "sessions"),
         new("backlog",   "backlog                  Per-session queued + unread mail", "sessions"),
         new("say",       "say <instance> <text>    Inject a prompt into a session's console", "comms"),

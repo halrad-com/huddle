@@ -22,6 +22,21 @@ public static class ConsoleIcon
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetConsoleWindow();
 
+    /// <summary>
+    /// huddle's own console window handle, or <see cref="IntPtr.Zero"/> when the host
+    /// gives none. Exposed here rather than re-declared elsewhere: the class summary
+    /// above is where the behaviour of this call (conhost vs Windows Terminal) is
+    /// already written down, and a second P/Invoke in another file would be a second
+    /// place for that note to go stale.
+    ///
+    /// <para>Callers that intend to raise the window must check both
+    /// <see cref="SessionWindow.IsLive"/> and <see cref="SessionWindow.IsVisible"/>
+    /// first. A Windows Terminal host hands back a pseudo-window rather than a zero
+    /// handle, and that pseudo-window is real enough to pass IsLive: only its
+    /// visibility gives it away.</para>
+    /// </summary>
+    public static IntPtr ConsoleWindow() => GetConsoleWindow();
+
     [DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 

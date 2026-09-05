@@ -67,10 +67,147 @@ settings system is broken.
 | `transcriptMaxScan` | int | 10..1000 | `100` | live | transcripts scanned by `history` / `find` |
 | `shellRegistration` | bool | | `true` | startup | keep the Start-menu entry registered and healed |
 | `commitAudit` | bool | | `true` | live | report commits touching files nobody claimed |
+| `peekHotkey` | text | | `Win+Alt+H` * | live | peek switcher chord; unset tries `Win+Alt+H`, `Ctrl+Alt+F12`, `Ctrl+Alt+F9`, `Ctrl+Alt+0` in order |
 
 `backoffSeconds` is text holding a comma-separated list because there are three kinds and an
 int array is not one of them. Adding a fourth kind for a single setting costs more than
 parsing one string, and that parse is validated at load like everything else.
+
+\* `peekHotkey` is the one row whose Default column is not the whole story. Unset, huddle
+tries a **list** of chords in order and binds the first Windows grants; the column shows the
+first of them, because a column ten characters wide cannot hold four chords and a display
+default the operator can actually press beats one that is a sentence. The full list is in
+the help text beside it, and in the section below.
+
+### `peekHotkey`
+
+The global chord that opens the peek switcher: the same overlay the `peek` verb shows and
+the pinned "Huddle Sessions" shortcut summons. It is registered at startup, and
+`settings peekHotkey <chord>` re-registers it on the running process, so a change takes
+effect immediately with no `reload`. It is the only setting that re-applies itself: finding
+a chord no other application owns is trial and error, and charging a rebuild-and-relaunch
+per guess made the search cost more than the feature.
+
+#### Unset: huddle picks, from a list
+
+With no `peekHotkey` in `huddle.json`, huddle tries these in order and keeps the first one
+Windows grants:
+
+1. `Win+Alt+H`
+2. `Ctrl+Alt+F12`
+3. `Ctrl+Alt+F9`
+4. `Ctrl+Alt+0`
+
+A single default is a hotkey that ships dead on any machine already running something that
+owns that chord, and the old `Ctrl+Alt+H` was exactly that: every start logged that the key
+was taken, and the only recovery was the operator guessing chords by hand. Every entry above
+was probe-registered on a real desktop and measured free; a candidate is measured, never
+reasoned about. `Ctrl+Alt+OemPlus` also measured free and is deliberately absent, because
+the chord grammar below cannot express it.
+
+The startup line names the chord that actually bound, and how many earlier candidates it
+walked past, so the key to press is never something you have to look up:
+
+```
+peek hotkey: 'Win+Alt+H' is live
+peek hotkey: 'Ctrl+Alt+F9' is live (2 earlier candidates were already taken)
+```
+
+If every candidate is taken, huddle says so in one line and names the way out. It still
+starts, and both other routes to the overlay still work:
+
+```
+peek hotkey: no chord is bound - all 4 candidates were taken (Win+Alt+H, Ctrl+Alt+F12, Ctrl+Alt+F9, Ctrl+Alt+0); set one with `settings peekHotkey <chord>`, and the peek verb and the pinned shortcut work meanwhile
+```
+
+#### Set: your chord, and only your chord
+
+A `peekHotkey` you wrote down is registered **alone**. There is no fallback, because an
+explicit choice has to be honoured or reported, never quietly swapped for a chord you did
+not ask for. What distinguishes the two cases is where the value came from, not what it
+says: a chord you set that happens to be the same as the first candidate is still your
+choice, and is still tried alone.
+
+Unsetting it goes back to the candidate walk, live, with no `reload`:
+
+```
+settings unset peekHotkey
+settings: unset peekHotkey — back to the built-in candidate chords
+peek hotkey: 'Win+Alt+H' is live now; 'Ctrl+Alt+J' is released
+```
+
+A chord is at least one modifier and exactly one key. Modifiers are `Ctrl` (or `Control`),
+`Alt`, `Shift` and `Win` (or `Windows` / `Super`), in any combination; the key is a single
+letter, a single digit, or `F1` through `F24`. Case is ignored and spaces around the `+`
+are trimmed, so `win + alt + h` and `Win+Alt+H` are one chord. A chord with **no modifier is
+refused**, because a global hotkey with no modifier swallows that key in every application
+on the desktop. A chord naming two keys is refused for a plainer reason: `RegisterHotKey`
+takes exactly one virtual key.
+
+Two failures are possible for a chord you set explicitly, both reported once at startup and
+neither fatal:
+
+- the text is not a usable chord: `peek hotkey: '<chord>' is not a usable chord (need at
+  least one modifier and one key); peek verb still works`
+- another application already owns it: `peek hotkey: '<chord>' is already taken by another
+  application; peek verb still works`
+
+In both cases huddle carries on without the hotkey. The `peek` verb and the pinned
+"Huddle Sessions" shortcut still open the switcher. An unavailable convenience key must
+never stop the orchestrator starting. A listener that lost its chord releases its window and
+ends its thread instead of parking on a hotkey that can never fire, so a candidate walk
+costs one thread and one window however many chords it had to step over.
+
+Changing it while huddle runs reports what actually happened, because the new value is
+written to `huddle.json` whether or not Windows grants the chord:
+
+```
+settings peekHotkey Ctrl+Alt+J
+settings: set peekHotkey = Ctrl+Alt+J
+peek hotkey: 'Ctrl+Alt+J' is live now; 'Win+Alt+H' is released
+```
+
+When the chord being replaced was never granted, the message says that instead of claiming
+huddle released something it never held:
+
+```
+peek hotkey: 'Ctrl+Alt+J' is live now; 'Ctrl+Alt+H' was never registered, so nothing was released
+```
+
+Setting the chord that is **already live** is answered, not refused. A chord belongs to the
+whole desktop rather than to a window, so asking Windows for one huddle already holds fails
+exactly like a competitor owning it; without this, re-setting the live chord named an
+application that does not exist. Spacing and case do not matter, because the comparison is
+between parsed chords:
+
+```
+settings peekHotkey ctrl + alt + j
+settings: set peekHotkey = ctrl + alt + j
+peek hotkey: 'ctrl + alt + j' is already the peek chord; nothing changed
+```
+
+A chord someone else owns leaves the running hotkey exactly as it was. The new chord is
+registered *before* the old one is released, so a guess that loses costs nothing:
+
+```
+peek hotkey: 'Ctrl+Alt+J' is already taken by another application; 'Ctrl+Alt+H' is still the peek chord
+```
+
+When the previously configured chord was never granted either, the message says so rather
+than claiming a chord is bound when none is:
+
+```
+peek hotkey: 'Ctrl+Alt+J' is already taken by another application; 'Ctrl+Alt+H' is still configured but was never registered, so no chord is bound; the peek verb still works
+```
+
+Text that is not a chord at all is refused before anything is registered:
+
+```
+peek hotkey: 'J' is not a usable chord (need at least one modifier and one key); 'Ctrl+Alt+H' is still the peek chord
+```
+
+The value is written to `huddle.json` in every case, so the chord the file names is the one
+the next start will try, even when this run could not take it.
 
 ## The `settings` verb
 
@@ -80,6 +217,10 @@ settings <key>               one key, in detail
 settings <key> <value>       validate and write back to huddle.json
 settings unset <key>         remove the key, reverting to the built-in default
 ```
+
+`settings unset peekHotkey` applies immediately too, exactly as its set path does: unsetting
+is the way out of a failed chord experiment, and the candidate walk starts again there and
+then.
 
 Everything after the key is the value, spaces included — `settings backoffSeconds 2, 5, 15`
 is written as `2,5,15`, not truncated at the first space.
@@ -113,6 +254,17 @@ These are dispatched in the same position as `--claim` / `--release` / `--ledger
 config load and before the console starts**, so a knob can be changed without launching the
 orchestrator — from a session, a script, or a second window while huddle is already running.
 Doing so does not disturb the running process; it re-reads on `reload`.
+
+That is why **every** `--set` says `takes effect on reload`, `live` keys included. `live`
+describes what a running orchestrator does with a value it re-reads; it says nothing about
+this process, which holds no hotkey switch and knows no running instance. `peekHotkey` names
+the one shortcut past the reload, because from inside a running huddle its verb applies the
+chord on the spot:
+
+```
+> huddle --set peekHotkey Ctrl+Alt+J
+set — peekHotkey = Ctrl+Alt+J (takes effect on reload, or immediately from `settings peekHotkey <chord>` inside a running huddle)
+```
 
 Because they run before the normal `--config` scan, the settings CLI performs its own scan
 for `--config` / `-c` first.

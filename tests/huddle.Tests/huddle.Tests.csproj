@@ -1,6 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <!-- Must track src/huddle.csproj: a net8.0 test project cannot reference a
+         net8.0-windows library. -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- Warnings cannot accumulate again. Forty CA1416s built up unnoticed because a
+         warning nobody has to act on is a warning everybody stops reading - the landmine
+         you forget about. Anything new breaks the build the moment it appears, when the
+         change that caused it is still in front of you.
+         Escape hatch, deliberately one visible line rather than a silent suppression: set
+         this false to unblock (e.g. an SDK upgrade adding a new analyser), fix the
+         warnings, set it back. Never add <NoWarn> for a specific rule without a comment
+         saying why the rule is wrong HERE. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RootNamespace>Huddle.Tests</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

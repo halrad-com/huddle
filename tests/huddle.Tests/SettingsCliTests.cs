@@ -40,6 +40,43 @@ public class SettingsCliTests
         File.Delete(p);
     }
 
+    // --set runs BEFORE the console starts, holds no hotkey switch and cannot reach a
+    // running huddle, so `Applies == Live` does not make the write live out here. When
+    // peekHotkey moved from startup to live, this path fell into the branch that printed
+    // nothing at all, and the operator lost the only line saying the chord had not changed
+    // on the instance they were looking at.
+    [Fact]
+    public void Set_of_a_live_key_still_says_it_lands_on_reload()
+    {
+        var p = Tmp("""{"sessions":[]}""");
+        var lines = new List<string>();
+        SettingsCli.Run(["--set", "taskAckMinutes", "10", "--config", p], lines.Add);
+        Assert.Contains(lines, l => l.Contains("takes effect on reload"));
+        File.Delete(p);
+    }
+
+    [Fact]
+    public void Set_of_peek_hotkey_names_the_verb_that_applies_it_immediately()
+    {
+        var p = Tmp("""{"sessions":[]}""");
+        var lines = new List<string>();
+        SettingsCli.Run(["--set", "peekHotkey", "Ctrl+Alt+J", "--config", p], lines.Add);
+        Assert.Contains(lines, l => l ==
+            "set — peekHotkey = Ctrl+Alt+J (takes effect on reload, or immediately from "
+            + "`settings peekHotkey <chord>` inside a running huddle)");
+        File.Delete(p);
+    }
+
+    [Fact]
+    public void Unset_of_peek_hotkey_says_it_goes_back_to_the_candidate_chords()
+    {
+        var p = Tmp("""{"sessions":[],"settings":{"peekHotkey":"Ctrl+Alt+J"}}""");
+        var lines = new List<string>();
+        Assert.Equal(0, SettingsCli.Run(["--unset", "peekHotkey", "--config", p], lines.Add));
+        Assert.Contains(lines, l => l.Contains("reverts to the built-in candidate chords"));
+        File.Delete(p);
+    }
+
     [Fact]
     public void Set_refusal_exits_one_and_names_key()
     {

@@ -139,6 +139,60 @@ public class SettingsVerbTests
         File.Delete(p);
     }
 
+    // --- peekHotkey applies on BOTH write paths --------------------------
+    //
+    // `settings peekHotkey <chord>` re-registered on the running process while
+    // `settings unset peekHotkey` still sent the operator to `reload`. Unsetting is the
+    // natural exit from a failed chord experiment, so the one key that needs no reload was
+    // telling the truth going in and not coming out.
+
+    static PeekHotkeySwitch FakeSwitch(Func<string, bool> grants, out List<string> made)
+    {
+        var chords = new List<string>();
+        made = chords;
+        var captured = chords;
+        return new PeekHotkeySwitch("Ctrl+Alt+Q", () => { }, _ => { },
+            (chord, _, log) =>
+            {
+                captured.Add(chord);
+                var ok = grants(chord);
+                if (!ok) log($"peek hotkey: '{chord}' is already taken by another application; peek verb still works");
+                return new StubHotkey(ok);
+            });
+    }
+
+    sealed class StubHotkey : IPeekHotkey
+    {
+        public StubHotkey(bool registered) { Registered = registered; }
+        public bool Registered { get; }
+        public void Dispose() { }
+    }
+
+    [Fact]
+    public void Unsetting_the_peek_hotkey_applies_the_candidate_walk_live()
+    {
+        var (ui, p) = Make("""{"sessions":[],"settings":{"peekHotkey":"Ctrl+Alt+Q"}}""");
+        using var sw = FakeSwitch(c => c == "Ctrl+Alt+Q" || c == PeekChord.Candidates[0], out var tried);
+        ui.PeekHotkeys = sw;
+
+        var text = Capture(ui, "settings unset peekHotkey");
+
+        Assert.Contains("settings: unset peekHotkey — back to the built-in candidate chords", text);
+        Assert.Contains($"peek hotkey: '{PeekChord.Candidates[0]}' is live now; 'Ctrl+Alt+Q' is released", text);
+        Assert.DoesNotContain("takes effect on reload", text);
+        Assert.Contains(PeekChord.Candidates[0], tried);
+        Assert.Equal(PeekChord.Candidates[0], sw.Chord);
+        File.Delete(p);
+    }
+
+    [Fact]
+    public void Unsetting_any_other_key_still_says_it_takes_a_reload()
+    {
+        var (ui, p) = Make("""{"sessions":[],"settings":{"gitPollSeconds":9}}""");
+        Assert.Contains("takes effect on reload", Capture(ui, "settings unset gitPollSeconds"));
+        File.Delete(p);
+    }
+
     // --- S2: reload refuses on EVERY load failure ------------------------
 
     [Theory]

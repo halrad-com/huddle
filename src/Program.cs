@@ -5,8 +5,27 @@ class Program
     // Held for the process lifetime; the OS releases it however huddle dies.
     private static Mutex? _singleton;
 
+    // Whether console output is UTF-8. Set on the first line of Main because EVERY
+    // mode prints - the CLI verbs return long before the interactive path is reached,
+    // and putting this later left `--settings` still flattening em-dashes to "-".
+    private static bool _utf8Console;
+
     static int Main(string[] args)
     {
+        // Before any output, in every mode. The console defaults to the system ANSI
+        // codepage, which turns the status row's warning sign into a bare "?" that
+        // reads as part of the message. No BOM, so redirecting stdout stays clean.
+        _utf8Console = ConsoleEncoding.TryEnableUtf8();
+
+        // Before ANY window exists in this process, including the hotkey listener's
+        // message-only one: DPI awareness is latched at the first window and cannot be
+        // changed afterwards. Without it the peek overlay is a DPI-unaware window, so
+        // Windows bitmap-stretches it on any display scaled differently from the primary
+        // and the live thumbnails come out visibly soft. PerMonitorV2 because the
+        // overlay opens on whichever monitor the cursor is on, and those can differ.
+        try { System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2); }
+        catch { /* older shell or already latched: the overlay still works, just softer */ }
+
         // Helper-process mode. The parent huddle's PromptInjector.Inject
         // spawns `huddle.exe --inject <pid> <b64utf8text>` as a throwaway
         // child so the parent never touches its own console. We do the
@@ -81,6 +100,16 @@ class Program
         if (args.Length >= 1 && args[0] == "--claim-check")
             return LedgerCommands.RunClaimCheck(Console.In.ReadToEnd(), Environment.GetEnvironmentVariable, Console.Error.WriteLine);
 
+        // The pinned "Huddle Sessions" taskbar button. Dispatched here, before config
+        // load and before the console starts, because it is a launcher and not a mode:
+        // it either nudges the huddle already running for this root or starts one, then
+        // exits. Falling through would boot a second orchestrator, which the singleton
+        // mutex would then have to refuse. Position-independent for the same reason the
+        // settings dispatch below is: `huddle --config x.json --peek` is a documented
+        // form, and matching args[0] alone let it fall through (S3).
+        if (PeekLauncher.IsPeek(args))
+            return PeekLauncher.Run(args, Console.WriteLine);
+
         // Settings access, same dispatch position and for the same reason: changing a
         // knob must not require launching the orchestrator, and must work from a script
         // or a second window while huddle is running. Position-independent: the
@@ -93,6 +122,9 @@ class Program
         // huddle runs under legacy conhost. When the console can't do VT, fall back
         // to plain-text titles instead of spewing raw escape sequences.
         ConsoleUI.HyperlinksEnabled = VtConsole.TryEnable();
+        // Say it once rather than leaving the operator to decode "?" on a status row.
+        if (!_utf8Console)
+            ConsoleUI.Log("Note: console is not UTF-8 — non-ASCII glyphs will render as '?'");
 
         // Put huddle's own icon on the console window + taskbar — the embedded
         // ApplicationIcon covers Explorer only; the live window needs WM_SETICON.
@@ -213,9 +245,11 @@ class Program
         // ISSUES.md I006). Keyed to the root directory so separate huddle roots
         // can still run side-by-side. An abandoned mutex (previous instance
         // crashed while holding it) still counts as acquired.
+        // The hash is shared with the peek signal event (ConfigPathResolver.RootHash), not
+        // reproduced here: the two names must agree about what "this root" means, or --peek
+        // signals a name nobody is listening on and starts an instance this mutex refuses.
         var rootKey = Path.GetFullPath(configDir).TrimEnd(Path.DirectorySeparatorChar).ToLowerInvariant();
-        var mutexName = "Local\\huddle-" + Convert.ToHexString(
-            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(rootKey)))[..16];
+        var mutexName = "Local\\huddle-" + ConfigPathResolver.RootHash(configDir);
         _singleton = new Mutex(initiallyOwned: false, mutexName);
         try
         {
@@ -573,6 +607,37 @@ class Program
             Personas = () => manager.GetAvailablePersonas(),
         });
         var lineEditor = new LineEditor(argCompleter);
+
+        // Global summon for the peek overlay. A failure here is reported and ignored:
+        // the `peek` verb and the pinned shortcut both still work without it.
+        //
+        // Owned by a switch rather than held directly, so `settings peekHotkey <chord>` can
+        // re-register on the running process. Hunting for a free chord is trial and error
+        // and used to cost a full `reload` per guess.
+        //
+        // The resolved SETTING goes in, not its text. Everything about hotkeys - whether an
+        // explicit chord is honoured alone or a candidate list is walked, what happens when
+        // one is taken, and which listener survives - belongs to the switch, so this file
+        // asks for a hotkey and is told what it got. There is no candidate list, no retry
+        // and no conflict handling here on purpose: two places deciding about chords is how
+        // the feature came to ship dead in the first place.
+        using var peekHotkey = new PeekHotkeySwitch(
+            config.Settings.Get("peekHotkey"),
+            () => PeekController.Show(manager, ipcManager, ConsoleUI.Log),
+            ConsoleUI.Log);
+        ui.PeekHotkeys = peekHotkey;
+
+        // The pinned "Huddle Sessions" shortcut runs `huddle --peek`, which sets this
+        // event rather than starting a second instance. Keyed to configDir by the same
+        // hash as the singleton mutex above, so two huddle roots cannot summon each
+        // other's overlay.
+        using var peekSignalCts = new CancellationTokenSource();
+        using var peekSignal = PeekSignal.Listen(
+            configDir,
+            () => PeekController.Show(manager, ipcManager, ConsoleUI.Log),
+            peekSignalCts.Token,
+            ConsoleUI.Log);
+
         var stopAll = false;
         while (true)
         {
@@ -642,6 +707,23 @@ class Program
                 ConsoleUI.Log($"Detaching. {running} session(s) still running.");
             }
         }
+        // Stop the peek listener BEFORE the using-var disposals at the return below.
+        // Disposing the event handle does not end that thread — WaitAny holds a ref on the
+        // SafeWaitHandle, so a parked wait survives the dispose and would still deliver one
+        // late summon into a half-torn-down huddle. Cancelling is the only thing that
+        // actually reaches the wait, and without this call PeekSignal.Listen's cancellation
+        // branch is unreachable in production: `using var` disposes a CancellationTokenSource,
+        // it never cancels one.
+        peekSignalCts.Cancel();
+        // The hotkey has to stop HERE too, for the same reason and not at the `using var`
+        // disposals at the return below: those run AFTER the three explicit disposals on
+        // the next lines, so a chord pressed between the shutdown prompt and process exit
+        // fires a summon that enumerates a session dictionary StopAll is tearing down and
+        // then calls GetBacklog on a disposed IpcManager. Declaration order cannot fix
+        // that — `using var` disposal happens at end of scope whatever the order is — so
+        // this is an explicit dispose rather than a moved declaration. PeekHotkeySwitch.Dispose
+        // is idempotent, so the using disposing it again on the way out is a no-op.
+        peekHotkey.Dispose();
         gitActivity.Dispose();
         orchestrator?.Dispose();
         ipcManager?.Dispose();
