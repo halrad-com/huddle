@@ -13,6 +13,66 @@ is the source of truth, the handle is just for reading.
 day: start a new day block at the top of the file. Never rewrite a shipped entry.
 History from before this file lives in the git commit log.
 
+## 2026-09-04
+
+### 2026-09-04.3 — Commit audit reads live claims, not just its own journal — (commit below)
+
+Third false accusation from the live run, and the most basic one: three files were
+reported while a live claim file covered them. That claim was written 90 minutes
+before the journal existed, and the audit consulted only the journal.
+
+The journal is HISTORY and starts empty; `claims/` is what is held right now and
+long predates it. Reading only the record it keeps itself made the audit blind to
+the authoritative present. It now folds both together — which also removes most of
+the "young journal is noisy" caveat the feature shipped with, since a fresh install
+inherits every claim already on disk. On this machine the index went from 27 entries
+to 181.
+
+### 2026-09-04.2 — Commit audit: two fixes from its first live firing — (commit below)
+
+The audit ran for real within minutes of shipping and got it wrong twice, both in
+the same shape the claim ledger has been bitten by before.
+
+It accused a file that HAD been claimed three minutes earlier. Claims are recorded
+relative to the claiming session's checkout root, commit paths relative to the git
+root, and for a checkout inside a larger repo those are two spellings of one file —
+`docs/BACKLOG.md` against `myapp/docs/BACKLOG.md`. That is I008's separator bug one
+level up. Claims are now indexed by ABSOLUTE path (the journal records the root),
+with a separator-anchored tail match for entries written before roots existed.
+
+And it reported the same commit twice, once per registered name, because two
+registered repos can point into one git repository. Registered names are now grouped
+onto their git top: one audit per repository, and — the half that matters more —
+their claims are unioned, so a claim recorded under one name covers a commit observed
+under the other.
+
+Both are verified against the exact live data that produced the bad output, not only
+against fixtures.
+
+### 2026-09-04.1 — Commits are audited against the claim ledger — (commit below)
+
+The `huddle --claim-check` hook is a PreToolUse guard, so it sees Edit and Write and
+nothing else. A file written through the shell — sed, a python one-liner, a redirect —
+reaches the repo unchecked. That is not a defect in the hook; a pre-tool guard can only
+see tool calls. This is the post-hoc half: on each periodic rescan huddle notices a
+repo's HEAD has moved, diffs the new commits, and reports any file no session ever
+claimed.
+
+Two design points worth stating, because both are refusals. It does NOT name a session:
+sessions share a worktree, huddle cannot attribute authorship, and a confident wrong
+accusation is how a ledger teaches people to ignore it. And it only warns — it cannot
+block a commit that already happened and must never be wired to anything that does.
+
+The existing stop-time scope-creep audit turned out to be near-dead in practice: it
+returns immediately unless the session still HOLDS claims, and the protocol tells agents
+to release as they finish. Sessions that follow the rules were audited least. Hence a
+new append-only `ipc/workledger/journal.jsonl` recording every grant, written at the one
+choke point every claim path goes through, so "was this ever claimed" survives release.
+
+Heads are seeded from current HEAD the first time a repo is seen, so only commits made
+while huddle is watching are audited — never a replay of pre-ledger history. New
+`commitAudit` setting (bool, default true) turns it off.
+
 ## 2026-09-03
 
 ### 2026-09-03.1 — The shell entry registers itself — (commit below)

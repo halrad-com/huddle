@@ -66,6 +66,7 @@ settings system is broken.
 | `taskAckMinutes` | int | 1..1440 | `15` | live | unacked task escalates after this |
 | `transcriptMaxScan` | int | 10..1000 | `100` | live | transcripts scanned by `history` / `find` |
 | `shellRegistration` | bool | | `true` | startup | keep the Start-menu entry registered and healed |
+| `commitAudit` | bool | | `true` | live | report commits touching files nobody claimed |
 
 `backoffSeconds` is text holding a comma-separated list because there are three kinds and an
 int array is not one of them. Adding a fourth kind for a single setting costs more than

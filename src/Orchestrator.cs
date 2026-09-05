@@ -14,6 +14,11 @@ public class Orchestrator : IDisposable
     private readonly Action<string> _log;
     private FileSystemWatcher? _watcher;
     private readonly WorkLedgerClaims _claims;
+    private readonly ClaimJournal _journal;
+    // git TOP -> last HEAD this process audited (keyed by repository, not by
+    // registered name, so nested registrations audit once). In-memory on purpose: a restart
+    // re-seeds from current HEAD, so huddle never replays old commits as findings.
+    private readonly Dictionary<string, string> _auditedHeads = new(StringComparer.OrdinalIgnoreCase);
     private readonly WorkQueue _queue;
     private readonly ResourceLedger _resLedger;
 
@@ -70,6 +75,7 @@ public class Orchestrator : IDisposable
         // consulted only for the non-blocking merge-risk report; when git cannot answer, the
         // report narrows and nothing else changes.
         _claims = new WorkLedgerClaims(ipc.ClaimsDir, log, ResolveRepoRoot, GitWorktrees.Identify);
+        _journal = new ClaimJournal(ipc.WorkLedgerDir, log);
         _queue = new WorkQueue(ipc.QueueDir, log);
         _queue.Load();
         _resLedger = new ResourceLedger(ipc.ResLedgerDir, log);
@@ -198,6 +204,7 @@ public class Orchestrator : IDisposable
             if (recovered > 0)
                 _log($"Orchestrator: periodic rescan recovered {recovered} command(s) the watcher missed");
             EscalateUnackedTasks();
+            AuditNewCommits();
         }
         catch (Exception ex)
         {
@@ -206,6 +213,81 @@ public class Orchestrator : IDisposable
         finally
         {
             Interlocked.Exchange(ref _rescanning, 0);
+        }
+    }
+
+    /// <summary>
+    /// Report commits that touched files nobody claimed — the post-hoc half of the
+    /// claim gate (see <see cref="CommitAudit"/>), because the PreToolUse hook can only
+    /// guard the Edit/Write tools and a shell write walks straight past it.
+    ///
+    /// Heads are seeded from the CURRENT HEAD the first time a repo is seen, so huddle
+    /// only ever audits commits made while it was watching. Auditing history on every
+    /// start would replay years of pre-ledger commits as findings, and a report that
+    /// opens with hundreds of stale accusations is one nobody reads twice.
+    ///
+    /// Warning only, and per repo: one repo failing (not a checkout, git missing) must
+    /// not stop the others being audited.
+    /// </summary>
+    private void AuditNewCommits()
+    {
+        if (!_manager.Config.Settings.Bool("commitAudit")) return;
+
+        // Group registered names onto the git repository they actually live in. Two
+        // names can be one repo (a project dir inside a larger checkout), which on the
+        // first live run reported a single commit twice AND split the claims across two
+        // buckets so a correctly-claimed file read as unclaimed.
+        var located = new List<(string Name, string Root, string Top)>();
+        foreach (var (name, def) in _manager.Repos)
+        {
+            try
+            {
+                var top = GitHelper.CheckoutIdentity(def.Root).Top;
+                if (!string.IsNullOrEmpty(top)) located.Add((name, def.Root, top!));
+            }
+            catch (Exception ex)
+            {
+                _log($"Orchestrator: commit audit skipped for {name} ({ex.Message})");
+            }
+        }
+
+        foreach (var group in CommitAudit.GroupByTop(located))
+        {
+            try
+            {
+                var head = GitHelper.GetHeadSha(group.Top);
+                if (string.IsNullOrEmpty(head)) continue;
+
+                if (!_auditedHeads.TryGetValue(group.Top, out var last))
+                {
+                    _auditedHeads[group.Top] = head;   // seed: audit from here forward
+                    continue;
+                }
+                if (string.Equals(last, head, StringComparison.OrdinalIgnoreCase)) continue;
+
+                var changed = GitHelper.DiffNames(group.Top, last);
+                _auditedHeads[group.Top] = head;
+                if (changed.Count == 0) continue;
+
+                // The journal AND the live claims directory. The journal is history and
+                // starts empty; claims/ is what is held right now and long predates it.
+                // Consulting only the journal accused three files that a live claim
+                // covered, written 90 minutes before the journal existed — the audit
+                // must read the authoritative present, not just the record it keeps.
+                var claimed = _journal.IndexFor(group.RepoNames);
+                var wanted = new HashSet<string>(group.RepoNames, StringComparer.OrdinalIgnoreCase);
+                foreach (var live in _claims.ReadAll())
+                    if (wanted.Contains(live.Repo))
+                        claimed.AddClaim(live.Root, live.Files);
+                var line = CommitAudit.Describe(
+                    group.DisplayName, head,
+                    CommitAudit.Unclaimed(changed, group.Top, claimed));
+                if (line != null) _log(line);
+            }
+            catch (Exception ex)
+            {
+                _log($"Orchestrator: commit audit skipped for {group.DisplayName} ({ex.Message})");
+            }
         }
     }
 

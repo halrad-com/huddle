@@ -22,6 +22,7 @@ ipc/processed/
 ipc/_huddle/
 ipc/workledger/claims/
 ipc/workledger/*.md
+ipc/workledger/*.jsonl
 
 # Claude Code runtime state
 .claude/scheduled_tasks.lock

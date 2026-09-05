@@ -30,6 +30,7 @@ public static class SettingsCatalog
         new SettingDef("taskAckMinutes",          SettingKind.Int,  1, 1440,  SettingApplies.Live,    "15",     "unacked task escalates after this"),
         new SettingDef("transcriptMaxScan",       SettingKind.Int,  10, 1000, SettingApplies.Live,    "100",    "transcripts scanned by history / find"),
         new SettingDef("shellRegistration",       SettingKind.Bool, 0, 0,     SettingApplies.Startup, "true",   "keep the Start-menu entry registered and healed"),
+        new SettingDef("commitAudit",             SettingKind.Bool, 0, 0,     SettingApplies.Live,    "true",   "report commits touching files nobody claimed"),
     };
 
     private static readonly Dictionary<string, SettingDef> ByKey =

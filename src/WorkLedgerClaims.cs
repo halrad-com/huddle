@@ -49,6 +49,7 @@ public sealed record ClaimOverlap(
 public class WorkLedgerClaims
 {
     private readonly string _claimsDir;
+    private readonly ClaimJournal _journal;
     private readonly Action<string> _log;
     private readonly Func<string, string?>? _resolveRoot;
     private readonly Func<string, CheckoutInfo?>? _identifyCheckout;
@@ -77,6 +78,15 @@ public class WorkLedgerClaims
         _log = log;
         _resolveRoot = resolveRoot;
         _identifyCheckout = identifyCheckout;
+        // The journal lives BESIDE claims/ (ipc/workledger/journal.jsonl), not inside
+        // it: ReadAll globs the claims dir, and a .jsonl in there would be one more
+        // thing every reader has to skip. Derived rather than injected so every write
+        // path — the CLI, the orchestrator, the queue — journals without being told to.
+        _journal = new ClaimJournal(
+            Path.GetDirectoryName(claimsDir.TrimEnd(Path.DirectorySeparatorChar,
+                                                    Path.AltDirectorySeparatorChar))
+                ?? claimsDir,
+            log);
     }
 
     /// <summary>
@@ -93,6 +103,12 @@ public class WorkLedgerClaims
     // Caller must hold _lock.
     private string WriteCore(WorkLedgerClaim claim)
     {
+        // Journal the grant before the claim file exists. Ordering matters in only one
+        // direction: a journal entry with no claim is harmless (the audit stays quiet
+        // about a file someone meant to claim), while a claim with no journal entry
+        // would make the audit accuse work that WAS declared.
+        _journal.Record(claim.SessionId, claim.Repo, claim.Files, claim.Root);
+
         Directory.CreateDirectory(_claimsDir);
         var sessionSafe = claim.SessionId.Replace(':', '_');
         var path = Path.Combine(_claimsDir, $"{claim.BatchId}-{sessionSafe}.md");
