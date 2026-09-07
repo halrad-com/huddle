@@ -13,6 +13,60 @@ is the source of truth, the handle is just for reading.
 day: start a new day block at the top of the file. Never rewrite a shipped entry.
 History from before this file lives in the git commit log.
 
+## 2026-09-06
+
+### 2026-09-06.3 - end of input detaches, it does not terminate the fleet - (commit below)
+
+huddle was killed, rebuilt and relaunched by hand. The relaunched process inherited a
+stdin that was already at end-of-file, recovered seven live sessions, and one second
+later terminated all seven. Nobody typed anything.
+
+Two mistakes compounded. End-of-input was routed to the same branch as Ctrl+C, and that
+branch stops every session. And the confirmation prompt meant to make teardown deliberate
+asked the same dead stdin, read null, and counted null as "yes".
+
+Now: EOF detaches - sessions keep running and are persisted for `recover`, exactly as
+`quit` does. Ctrl+C keeps its destructive meaning, because it is an actual keystroke by
+someone who can answer the prompt. And an unreadable answer is never consent
+(`ShutdownPolicy.IsConsent`). Being unable to ask is not being told yes.
+
+### 2026-09-06.2 - reload looks for its helper beside the config, not the cwd - (commit below)
+
+`reload` reported `helper not found at ...\publishuild-restart.cmd - staying up` and
+refused, on a machine where the helper sits at the repo root exactly as it should.
+
+It derived the repo root from `Directory.GetCurrentDirectory()`. That held while huddle
+was always started from its repo root, and stopped holding when shell registration made
+launching from anywhere the normal case - the Start-menu shortcut, `Win+R` via App Paths,
+a double-clicked `publish\huddle.exe`. `ConfigPathResolver` was given a registered-root
+fallback precisely so those launches boot the right huddle, and they do; `reload` was the
+one reader never repointed at it, so it kept asking a cwd that is no longer meaningful.
+`census` had already been written the correct way in the same file.
+
+The root now comes from `ConfigPath`, which is absolute by the time the console has it.
+A huddle launched from anywhere can reload itself again.
+
+### 2026-09-06.1 - A refused task update says which refusal it was - (commit below)
+
+`task-complete` nacked `unknown task <id>` for five different failures, and only one
+of them was unknown. The id could be unparseable, it could name nothing, it could be
+bare and ambiguous across two repos, the state could be one no update can set, or the
+transition could be illegal. `TaskTracker` already distinguished all five and already
+wrote the right sentence for each - to the console, where the agent who needed it
+could not see it. `UpdateState` now hands that sentence back through an `out string
+why` and `HandleTaskUpdate` mails it.
+
+Two sessions lost an evening to this in one night, for two different underlying
+causes, and both reached a wrong conclusion first: one read "unknown" as a lost row
+and went looking for data loss, the other concluded the task had never been
+registered and stopped. Verified against copies of the live workspace and myapp
+ledgers - the two real nacks now read `myapp:T-005 is accepted; accepted ->
+delivered is not a legal move` and `T-001 is ambiguous - it exists in workspace,
+myapp; qualify it (<repo>:T-001)`.
+
+Nothing about id semantics or the state machine changed. Bare ids are still refused
+when ambiguous, and a delivered row still refuses to re-deliver.
+
 ## 2026-09-05
 
 ### 2026-09-05.2 — The peek hotkey binds on arrival — (commit below)

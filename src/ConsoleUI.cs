@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace Huddle;
 
@@ -2375,7 +2375,13 @@ public class ConsoleUI
             return false;
         }
 
-        var repoRoot = Directory.GetCurrentDirectory();
+        // Beside the CONFIG, not beside the cwd. Shell registration made launching from
+        // anywhere normal — the Start-menu shortcut, Win+R via App Paths, a double-clicked
+        // publish\huddle.exe — and ConfigPathResolver already falls back to the registered
+        // root, so ConfigPath is the reliable anchor and the cwd is not. Asking the cwd
+        // meant a huddle launched from publish\ could never reload itself.
+        var repoRoot = Path.GetDirectoryName(Path.GetFullPath(ConfigPath))
+                       ?? Directory.GetCurrentDirectory();
         var helper = Path.Combine(repoRoot, "build-restart.cmd");
         if (!File.Exists(helper))
         {

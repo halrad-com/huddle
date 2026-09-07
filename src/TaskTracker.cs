@@ -1,4 +1,4 @@
-namespace Huddle;
+﻿namespace Huddle;
 
 public enum TaskState { Pending, Delegated, InProgress, Completed, Failed }
 
@@ -92,15 +92,27 @@ public class TaskTracker
     /// is not walked back to in-progress and a terminal one is not reopened.
     /// </summary>
     public bool UpdateState(string taskId, TaskState newState, string? notes = null)
+        => UpdateState(taskId, newState, notes, out _);
+
+    /// <summary>
+    /// As <see cref="UpdateState(string, TaskState, string?)"/>, and on refusal sets
+    /// <paramref name="why"/> to the sentence naming WHICH refusal it was. The caller
+    /// mails it. Four distinct failures used to reach the agent as "unknown task", and
+    /// only one of them is unknown — the right words were already being written, to the
+    /// console, where the agent who needed them could not see them.
+    /// </summary>
+    public bool UpdateState(string taskId, TaskState newState, string? notes, out string why)
     {
+        why = "";
         if (StateName(newState) is null)
-        { _log($"ledger: {taskId} -> {newState} is not a state a task update can set"); return false; }
-        if (!TryResolve(taskId, out var repo, out var task)) return false;
+        { why = $"{taskId} -> {newState} is not a state a task update can set"; _log("ledger: " + why); return false; }
+        if (!TryResolve(taskId, out var repo, out var task, out why)) return false;
 
         var toState = TargetState(newState, task!.State);
         if (!LedgerStateMachine.CanTransitionTask(task.State, toState))
         {
-            _log($"ledger: {repo}:{task.Id} is {task.State}; {task.State} -> {toState} is not a legal move");
+            why = $"{repo}:{task.Id} is {task.State}; {task.State} -> {toState} is not a legal move";
+            _log("ledger: " + why);
             return false;
         }
 
@@ -110,7 +122,7 @@ public class TaskTracker
     }
 
     public TrackedTask? Get(string taskId) =>
-        TryResolve(taskId, out var repo, out var task) ? ToTracked(repo!, task!) : null;
+        TryResolve(taskId, out var repo, out var task, out _) ? ToTracked(repo!, task!) : null;
 
     public IReadOnlyList<TrackedTask> GetAll() =>
         AllTasks().OrderBy(x => x.Task.AssignedAt).Select(x => ToTracked(x.Repo, x.Task)).ToList();
@@ -142,20 +154,22 @@ public class TaskTracker
     /// per repo, so silently updating whichever was found first would mark the wrong
     /// agent's work complete.
     /// </summary>
-    bool TryResolve(string taskId, out string? repo, out LedgerTask? task)
+    bool TryResolve(string taskId, out string? repo, out LedgerTask? task, out string why)
     {
-        repo = null; task = null;
-        if (!TryParseTaskId(taskId, out var id)) { _log($"ledger: \"{taskId}\" is not a task id"); return false; }
+        repo = null; task = null; why = "";
+        if (!TryParseTaskId(taskId, out var id))
+        { why = $"\"{taskId}\" is not a task id"; _log("ledger: " + why); return false; }
 
         var bare = id with { Repo = null };
         var matches = AllTasks()
             .Where(x => x.Task.Id == bare && (id.Repo is null || id.Repo.Equals(x.Repo, StringComparison.OrdinalIgnoreCase)))
             .ToList();
 
-        if (matches.Count == 0) { _log($"ledger: no task {taskId}"); return false; }
+        if (matches.Count == 0) { why = $"no task {taskId}"; _log("ledger: " + why); return false; }
         if (matches.Count > 1)
         {
-            _log($"ledger: {bare} is ambiguous — it exists in {string.Join(", ", matches.Select(m => m.Repo))}; qualify it (<repo>:{bare})");
+            why = $"{bare} is ambiguous — it exists in {string.Join(", ", matches.Select(m => m.Repo))}; qualify it (<repo>:{bare})";
+            _log("ledger: " + why);
             return false;
         }
         (repo, task) = matches[0];

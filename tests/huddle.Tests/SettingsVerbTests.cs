@@ -1,4 +1,4 @@
-using Huddle;
+﻿using Huddle;
 namespace Huddle.Tests;
 
 // The `settings` console verb and `reload`'s pre-validation, driven through
@@ -227,5 +227,61 @@ public class SettingsVerbTests
         File.WriteAllText(p, """{"sessions":[],"settings":{"bogus":1}}""");
         Assert.Contains("bogus", Capture(ui, "reload /y"));
         File.Delete(p);
+    }
+
+    // --- reload looks for its helper beside the CONFIG, not beside the cwd ----
+    //
+    // Shell registration made launching from anywhere the normal case: the Start-menu
+    // shortcut, Win+R via App Paths, and a double-clicked publish\huddle.exe all boot
+    // fine because ConfigPathResolver falls back to the registered root. reload alone
+    // still asked the cwd, so a huddle launched from publish\ reported
+    // "helper not found at ...\publishuild-restart.cmd" and refused to reload at all.
+    // `census` (ConsoleUI, HandleCensus) already derived its root from ConfigPath; this
+    // is the same derivation.
+
+    [Fact]
+    public void Reload_looks_for_the_helper_beside_the_config_not_the_working_directory()
+    {
+        var (ui, p) = Make("""{"sessions":[]}""");
+        var configDir = Path.GetDirectoryName(Path.GetFullPath(p))!;
+
+        var text = Capture(ui, "reload /y");
+
+        // No helper anywhere in play, so it refuses either way — the PATH it names is
+        // the whole point.
+        Assert.Contains(Path.Combine(configDir, "build-restart.cmd"), text);
+        Assert.DoesNotContain(Path.Combine(Directory.GetCurrentDirectory(), "build-restart.cmd"), text);
+        Assert.DoesNotContain("helper launched", text);
+        File.Delete(p);
+    }
+
+    [Fact]
+    public void Reload_finds_a_helper_beside_the_config_that_the_working_directory_lacks()
+    {
+        // The positive half: with the helper present beside the config it gets PAST the
+        // not-found refusal. Stops at the confirmation prompt (no /y) so nothing spawns.
+        var dir = Path.Combine(Path.GetTempPath(), "huddle-reload-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var p = Path.Combine(dir, "huddle.json");
+        File.WriteAllText(p, """{"sessions":[]}""");
+        File.WriteAllText(Path.Combine(dir, "build-restart.cmd"), "@echo off");
+        Assert.False(File.Exists(Path.Combine(Directory.GetCurrentDirectory(), "build-restart.cmd")));
+
+        var cfg = HuddleConfig.Load(p);
+        var mgr = new SessionManager(cfg, "claude.exe", Path.GetTempPath(), Path.GetTempPath(), null, _ => { });
+        var ui = new ConsoleUI(mgr) { ConfigPath = p };
+
+        var original = Console.Out;
+        var inOriginal = Console.In;
+        var sw = new StringWriter();
+        Console.SetOut(sw);
+        Console.SetIn(new StringReader("n"));   // decline at the prompt
+        try { ui.HandleCommand("reload"); }
+        finally { Console.SetOut(original); Console.SetIn(inOriginal); }
+
+        var text = sw.ToString();
+        Assert.DoesNotContain("helper not found", text);
+        Assert.Contains("cancelled", text);
+        Directory.Delete(dir, true);
     }
 }

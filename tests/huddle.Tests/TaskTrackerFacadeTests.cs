@@ -255,4 +255,74 @@ public class TaskTrackerFacadeTests : IDisposable
         Assert.Null(New().Create("a", "nosuchrepo:backenddev", "x"));
         Assert.Contains(_log, l => l.Contains("nosuchrepo"));
     }
+
+    // ---- a refusal says which refusal it is ----
+    //
+    // Every one of these used to reach the agent as "unknown task <id>". Only the
+    // third is unknown. Two sessions lost an evening to the other three, and in both
+    // the accurate sentence was already in the console log.
+
+    [Fact]
+    public void A_refused_transition_says_so_rather_than_calling_the_task_unknown()
+    {
+        // The case agents hit most: task-complete on work already delivered.
+        var id = New().Create("a", "huddle:backenddev", "x")!.TaskId;
+        Assert.True(New().UpdateState(id, TaskState.Completed, null, out _));
+
+        Assert.False(New().UpdateState(id, TaskState.Completed, null, out var why));
+        Assert.Contains("delivered", why);
+        Assert.Contains("not a legal move", why);
+        Assert.DoesNotContain("unknown", why);
+    }
+
+    [Fact]
+    public void An_ambiguous_bare_id_names_the_repos_it_matched_and_how_to_qualify_it()
+    {
+        var t = New();
+        t.Create("a", "huddle:backenddev", "x");
+        t.Create("b", "myapp:backenddev", "x");
+
+        Assert.False(New().UpdateState("T-001", TaskState.Completed, null, out var why));
+        Assert.Contains("ambiguous", why);
+        Assert.Contains("huddle", why);
+        Assert.Contains("myapp", why);
+        Assert.DoesNotContain("unknown", why);
+    }
+
+    [Fact]
+    public void An_id_that_names_nothing_is_the_one_case_that_really_is_unknown()
+    {
+        Assert.False(New().UpdateState("huddle:T-404", TaskState.Completed, null, out var why));
+        Assert.Contains("no task", why);
+    }
+
+    [Fact]
+    public void An_unparseable_id_says_it_is_not_an_id_rather_than_that_it_is_missing()
+    {
+        Assert.False(New().UpdateState("not-an-id", TaskState.Completed, null, out var why));
+        Assert.Contains("not a task id", why);
+    }
+
+    [Fact]
+    public void A_state_no_update_can_set_says_that_and_never_looks_the_id_up()
+    {
+        var id = New().Create("a", "huddle:backenddev", "x")!.TaskId;
+        Assert.False(New().UpdateState(id, TaskState.Delegated, null, out var why));
+        Assert.Contains("not a state", why);
+    }
+
+    [Fact]
+    public void A_reason_is_never_blank_on_a_refusal_and_never_set_on_success()
+    {
+        // The nack sends `why` verbatim, so an unset one would mail an empty sentence.
+        var id = New().Create("a", "huddle:backenddev", "x")!.TaskId;
+        Assert.True(New().UpdateState(id, TaskState.InProgress, null, out var ok));
+        Assert.Equal("", ok);
+
+        foreach (var bad in new[] { "not-an-id", "huddle:T-404" })
+        {
+            Assert.False(New().UpdateState(bad, TaskState.Completed, null, out var why));
+            Assert.False(string.IsNullOrWhiteSpace(why));
+        }
+    }
 }

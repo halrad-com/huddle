@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace Huddle;
@@ -715,9 +715,12 @@ public class Orchestrator : IDisposable
             var taskId = body.GetProperty("taskId").GetString() ?? "";
             var notes = body.TryGetProperty("notes", out var n) ? n.GetString() : null;
 
-            var ok = _tasks.UpdateState(taskId, state, notes);
+            // The reason travels with the refusal. "unknown task" is the fallback for a
+            // future refusal path that forgets to set one, not the answer for all of them.
+            var ok = _tasks.UpdateState(taskId, state, notes, out var why);
             if (ok) SendAck(msg.From, msg.Subject, $"{taskId} -> {state}");
-            else SendNack(msg.From, msg.Subject, $"unknown task {taskId}");
+            else SendNack(msg.From, msg.Subject,
+                string.IsNullOrWhiteSpace(why) ? $"unknown task {taskId}" : why);
         }
         catch (Exception ex)
         {

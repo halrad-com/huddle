@@ -574,19 +574,18 @@ class Program
         };
 
         // Gate every teardown path. Returns true if it is OK to proceed to StopAll().
-        // No running sessions → nothing to protect, proceed silently. A null
-        // (unreadable) answer means stdin is gone and huddle can no longer be
-        // operated, so we proceed rather than spin forever.
+        // No running sessions → nothing to protect, proceed silently.
+        //
+        // A null (unreadable) answer used to return TRUE, on the reasoning that stdin was
+        // gone so huddle could not be operated anyway. That reasoning cost the operator
+        // seven live sessions on 2026-09-06: the prompt asked a dead stdin, read null, and
+        // took it as "yes". Being unable to ask is not being told yes — see ShutdownPolicy.
         bool ConfirmShutdown()
         {
             var running = manager.Instances.Count(i => i.Value.IsAlive);
             if (running == 0) return true;
             Console.Write($"{running} huddle session(s) are running. Terminate them in progress? (y/N): ");
-            var answer = Console.ReadLine();
-            if (answer == null) return true;
-            answer = answer.Trim();
-            return answer.Equals("y", StringComparison.OrdinalIgnoreCase)
-                || answer.Equals("yes", StringComparison.OrdinalIgnoreCase);
+            return ShutdownPolicy.IsConsent(Console.ReadLine(), running);
         }
 
         // Command loop. One editor for the whole loop so history persists across
@@ -648,21 +647,32 @@ class Program
                 ? Console.ReadLine()
                 : lineEditor.ReadLine("> ", () => ctrlCPressed);
 
-            // Ctrl+C or EOF: both tear down every session. Record which trigger fired,
-            // confirm, then log the decision — so an abnormal teardown is never a mystery.
-            if (ctrlCPressed || line == null)
+            // Ctrl+C is a keystroke: someone is at the console, they meant it, and they can
+            // answer the prompt. It keeps the destructive meaning.
+            if (ctrlCPressed)
             {
-                var trigger = ctrlCPressed ? "Ctrl+C" : "EOF/stdin-closed";
                 ctrlCPressed = false;
-                ConsoleUI.Log($"Shutdown requested via {trigger}.");
+                ConsoleUI.Log("Shutdown requested via Ctrl+C.");
                 if (ConfirmShutdown())
                 {
-                    ConsoleUI.Log($"SHUTDOWN CONFIRMED via {trigger} — stopping all sessions.");
+                    ConsoleUI.Log("SHUTDOWN CONFIRMED via Ctrl+C — stopping all sessions.");
                     stopAll = true;
                     break;
                 }
-                ConsoleUI.Log($"Shutdown via {trigger} CANCELLED by operator. Sessions still running.");
-                continue;
+                ConsoleUI.Log("Shutdown via Ctrl+C CANCELLED by operator. Sessions still running.");
+                continue;   // if stdin is also dead, the next read falls into the EOF branch
+            }
+
+            // End of input is the ABSENCE of a keystroke — a closed pipe, a launch that
+            // inherited a spent stdin, a console that went away. It says nobody is here to
+            // drive huddle, so huddle lets go: sessions keep running and are persisted for
+            // `recover`, exactly as `quit` does. It used to terminate them all instead, and
+            // on 2026-09-06 it did that to seven live sessions one second after recovering
+            // them, unattended, printing its confirmation prompt to a console nobody had.
+            if (line == null)
+            {
+                ConsoleUI.Log("Input ended (EOF/stdin-closed) — detaching. Sessions left running.");
+                break;      // stopAll stays false: the detach path below persists + reports
             }
 
             ConsoleUI.LogInput(line);   // durable record of the exact command entered
