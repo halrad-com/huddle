@@ -67,6 +67,7 @@ settings system is broken.
 | `transcriptMaxScan` | int | 10..1000 | `100` | live | transcripts scanned by `history` / `find` |
 | `shellRegistration` | bool | | `true` | startup | keep the Start-menu entry registered and healed |
 | `commitAudit` | bool | | `true` | live | report commits touching files nobody claimed |
+| `scratchpadInjectChars` | int | 0..1048576 | `8192` | live | scratchpad tail injected at spawn, section-aligned; `0` = whole file |
 | `peekHotkey` | text | | `Win+Alt+H` * | live | peek switcher chord; unset tries `Win+Alt+H`, `Ctrl+Alt+F12`, `Ctrl+Alt+F9`, `Ctrl+Alt+0` in order |
 
 `backoffSeconds` is text holding a comma-separated list because there are three kinds and an

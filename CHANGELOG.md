@@ -13,6 +13,21 @@ is the source of truth, the handle is just for reading.
 day: start a new day block at the top of the file. Never rewrite a shipped entry.
 History from before this file lives in the git commit log.
 
+## 2026-09-10
+
+### 2026-09-10.1 - scratchpad injection is bounded - (commit below)
+
+Every spawn pasted the session's whole scratchpad into its system prompt. The fleet's
+files measured 80 to 500 KB on 2026-09-09; the largest outweighed the task prompt about
+50 to 1 with months of state claims that were no longer true, and an agent reads its own
+old notes with the same authority as the operator's instruction.
+
+New setting `scratchpadInjectChars` (default 8192, 0 = whole file as before). huddle
+injects the tail, snapped forward to the next `## ` heading so it never opens
+mid-section, with a preface naming how much was left out and where the file is. The file
+on disk is untouched and `find` still searches all of it. Every real scratchpad had a
+heading inside its last 8 KB, so the default lands on a section start fleet-wide.
+
 ## 2026-09-06
 
 ### 2026-09-06.3 - end of input detaches, it does not terminate the fleet - (commit below)

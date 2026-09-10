@@ -31,6 +31,9 @@ public static class SettingsCatalog
         new SettingDef("transcriptMaxScan",       SettingKind.Int,  10, 1000, SettingApplies.Live,    "100",    "transcripts scanned by history / find"),
         new SettingDef("shellRegistration",       SettingKind.Bool, 0, 0,     SettingApplies.Startup, "true",   "keep the Start-menu entry registered and healed"),
         new SettingDef("commitAudit",             SettingKind.Bool, 0, 0,     SettingApplies.Live,    "true",   "report commits touching files nobody claimed"),
+        // Bounds the PUSH only: the scratchpad file is untouched and `find` searches all
+        // of it. Read at every spawn, so Live. 0 restores the whole-file injection.
+        new SettingDef("scratchpadInjectChars",   SettingKind.Int,  0, 1048576, SettingApplies.Live,  "8192",   "scratchpad tail injected at spawn, section-aligned; 0 = whole file"),
         // Live in the strongest sense in this catalog: setting it re-registers the chord on
         // the running process through PeekHotkeySwitch, so it needs no reload at all.
         //

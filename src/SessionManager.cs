@@ -334,12 +334,18 @@ exit 0
         var scratchpadPath = GetScratchpadPath(instance);
         parts.Add($"Scratchpad: {scratchpadPath}\nWrite checkpoint notes here as you work — decisions made, things found, issues hit, state of progress. Include the git commit hash with each checkpoint.");
 
-        // If scratchpad has existing content (crash recovery), include it
+        // If scratchpad has existing content (crash recovery), include its TAIL. The whole
+        // file used to go in; see ScratchpadInjection for why that stopped.
         if (File.Exists(scratchpadPath))
         {
             var existing = File.ReadAllText(scratchpadPath).Trim();
             if (existing.Length > 0)
-                parts.Add($"Previous scratchpad content (from prior session):\n{existing}");
+            {
+                var sel = ScratchpadInjection.Select(existing, _config.Settings.Int("scratchpadInjectChars"));
+                if (sel.Truncated)
+                    _log($"Scratchpad for {instance.InstanceId}: injecting last {sel.Text.Length} of {sel.TotalChars} chars (scratchpadInjectChars)");
+                parts.Add($"{ScratchpadInjection.Preface(sel, scratchpadPath)}\n{sel.Text}");
+            }
         }
 
         return string.Join("\n\n", parts);

@@ -81,9 +81,9 @@ public class SettingsLoadTests
     }
 
     [Fact]
-    public void Catalog_has_the_seventeen_spec_keys()
+    public void Catalog_has_the_eighteen_spec_keys()
     {
-        Assert.Equal(17, SettingsCatalog.All.Count);
+        Assert.Equal(18, SettingsCatalog.All.Count);
         Assert.True(SettingsCatalog.TryGet("TASKACKMINUTES", out var d)); // case-insensitive
         Assert.Equal("taskAckMinutes", d.Key);
     }
