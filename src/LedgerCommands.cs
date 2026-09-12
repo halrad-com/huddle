@@ -111,6 +111,43 @@ public static class LedgerCommands
     }
 
     /// <summary>
+    /// The registered repo a path belongs to, and that repo's root: the LONGEST registered root
+    /// that contains the path (or is the path). Null when no config can be read, or when no
+    /// registered repo contains it.
+    ///
+    /// Roots nest in real configs — a workspace repo holds every repo, and an outer repo can hold
+    /// a registered project directory — so "the repo I am standing in" is ambiguous, while "the
+    /// most specific repo holding this file" is not. It is the same rule the edit gate applies
+    /// in <see cref="ClaimCheckCore"/>, and it has to be: if a checkout filed a file under the
+    /// outer repo while the gate filed the same file under the nested one, the two would never
+    /// meet and the gate would wave the edit through. Ties keep the first registration.
+    /// </summary>
+    public static (string Name, string Root)? RepoForPath(string claimsDir, string fullPath)
+    {
+        try
+        {
+            var configPath = FindConfig(claimsDir);
+            if (configPath == null) return null;
+            var full = Path.GetFullPath(fullPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            (string Name, string Root)? best = null;
+            foreach (var s in HuddleConfig.Load(configPath).Sessions)
+            {
+                if (string.IsNullOrWhiteSpace(s.Name) || string.IsNullOrWhiteSpace(s.Root)) continue;
+                var root = Path.GetFullPath(s.Root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var inside = full.Equals(root, StringComparison.OrdinalIgnoreCase) ||
+                             full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+                if (!inside) continue;
+                if (best == null || root.Length > best.Value.Root.Length) best = (s.Name, root);
+            }
+            return best;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// huddle.json (or the legacy myapp.json Program.cs still accepts) beside the ipc
     /// directory that holds this claims dir, or null if there is nothing there to read.
     /// A HUDDLE_CLAIMS pointed somewhere else entirely simply finds no config and degrades.

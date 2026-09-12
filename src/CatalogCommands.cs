@@ -1,15 +1,23 @@
 namespace Huddle;
 
 /// <summary>
-/// The circulation desk: `--checkout`, `--checkin`, `--catalog`.
+/// The circulation desk: `--checkout`, `--checkin`, `--catalog`, `--status`.
 ///
 /// These verbs exist to be usable by an agent nobody configured. The claim CLI refuses
 /// without <c>HUDDLE_CLAIMS</c> and <c>HUDDLE_INSTANCE</c> in the environment
 /// (LedgerCommands.TryContext), and only sessions huddle spawned itself have them — which is
 /// precisely why an outsider could not take part. So nothing here requires environment:
-/// the ledger is FOUND by walking up from the working directory for <c>ipc/workledger</c>,
-/// the repo is inferred from the checkout it finds, and identity is whatever the caller says
-/// it is. Environment variables, when present, are only defaults.
+///
+///   * the ledger is FOUND, by walking up from the working directory for <c>ipc/workledger</c>
+///     and then up from the huddle binary's own folder. The second walk is what reaches the one
+///     shared ledger from a different repo entirely — an agent working in another checkout runs
+///     the same huddle.exe, and that binary lives in the huddle install;
+///   * each path is resolved to its repo by its FULL path, choosing the most specific registered
+///     repo that contains it. That is the rule the edit gate uses, so a checkout and the gate name
+///     a file the same way whichever folder the agent runs from;
+///   * identity is whatever the caller says it is.
+///
+/// Environment variables, when present, are only defaults.
 ///
 /// Exit codes: 0 granted, 1 refused because somebody holds it, 2 usage, 3 failure. The
 /// distinct refusal code matters — a wrapper can branch on "busy" without parsing prose.
@@ -21,13 +29,27 @@ public static class CatalogCommands
     private const int Usage = 2;
     private const int Failed = 3;
 
-    public static int RunCheckout(string[] args, Func<string, string?> env, Action<string> outLine)
+    public static int RunCheckout(string[] args, Func<string, string?> env, Action<string> outLine) =>
+        RunCheckout(args, env, outLine, Directory.GetCurrentDirectory(), AppContext.BaseDirectory);
+
+    public static int RunCheckin(string[] args, Func<string, string?> env, Action<string> outLine) =>
+        RunCheckin(args, env, outLine, Directory.GetCurrentDirectory(), AppContext.BaseDirectory);
+
+    public static int RunStatus(string[] args, Func<string, string?> env, Action<string> outLine) =>
+        RunStatus(args, env, outLine, Directory.GetCurrentDirectory(), AppContext.BaseDirectory);
+
+    public static int RunCatalog(string[] args, Func<string, string?> env, Action<string> outLine) =>
+        RunCatalog(args, env, outLine, Directory.GetCurrentDirectory(), AppContext.BaseDirectory);
+
+    /// <summary>Testable form: the working directory and the binary's folder are passed in.</summary>
+    public static int RunCheckout(string[] args, Func<string, string?> env, Action<string> outLine,
+                                    string cwd, string exeDir)
     {
-        var o = Options.Parse(args, env, outLine);
+        var o = Options.Parse(args, env, outLine, cwd, exeDir);
         if (o == null) return Usage;
         if (o.Paths.Count == 0)
         {
-            outLine("usage: huddle --checkout [--as <name>] [--repo <name>] [--lease <minutes>] <repo-relative-path> [more paths...]");
+            outLine("usage: huddle --checkout [--as <name>] [--repo <name>] [--lease <minutes>] <path> [more paths...]");
             return Usage;
         }
         if (!RequireBorrower(o, outLine)) return Usage;
@@ -56,45 +78,50 @@ public static class CatalogCommands
         return Ok;
     }
 
-    public static int RunCheckin(string[] args, Func<string, string?> env, Action<string> outLine)
+    public static int RunCheckin(string[] args, Func<string, string?> env, Action<string> outLine,
+                                   string cwd, string exeDir)
     {
-        var o = Options.Parse(args, env, outLine);
+        var o = Options.Parse(args, env, outLine, cwd, exeDir);
         if (o == null) return Usage;
         if (!RequireBorrower(o, outLine)) return Usage;
 
         var cat = new FileCatalog(o.CatalogDir);
 
-        // `--checkin --all` returns everything this borrower holds. A borrower that is about
-        // to exit should not have to remember what it took.
-        var paths = o.All
-            ? cat.ReadAll().Where(e => SameRepo(e.Repo, o.Repo) && SameBorrower(e.Borrower, o.Borrower))
-                 .Select(e => e.RelPath).ToList()
-            : o.Paths;
+        // `--checkin --all` returns everything this borrower holds — in every repo, unless --repo
+        // narrows it. A borrower's books are its books: an agent that worked across two repos, or
+        // ran from a folder above the repo it edited, must not have to know which repo each file
+        // was filed under in order to give it back.
+        var targets = o.All
+            ? cat.ReadAll()
+                 .Where(e => SameBorrower(e.Borrower, o.Borrower) && (!o.RepoWasGiven || SameRepo(e.Repo, o.Repo)))
+                 .Select(e => (Repo: e.Repo, Path: e.RelPath, Root: e.Root))
+                 .ToList()
+            : o.Paths.Select(p => (Repo: o.Repo, Path: p, Root: o.Root)).ToList();
 
-        if (paths.Count == 0)
+        if (targets.Count == 0)
         {
-            if (o.All) { outLine($"{o.Borrower} holds nothing in {o.Repo}."); return Ok; }
-            outLine("usage: huddle --checkin [--as <name>] [--repo <name>] (<repo-relative-path> [more paths...] | --all)");
+            if (o.All) { outLine($"{o.Borrower} holds nothing{(o.RepoWasGiven ? $" in {o.Repo}" : "")}."); return Ok; }
+            outLine("usage: huddle --checkin [--as <name>] [--repo <name>] (<path> [more paths...] | --all)");
             return Usage;
         }
 
         int done = 0;
-        foreach (var p in paths)
+        foreach (var t in targets)
         {
             // Read the entry BEFORE returning it, so the hash recorded at checkout is still
             // there to compare against. Katalog's influence: saying what changed is more use
             // than saying the book came back.
-            var mine = cat.Status(o.Repo, p);
-            if (cat.CheckIn(o.Repo, p, o.Borrower))
+            var mine = cat.Status(t.Repo, t.Path);
+            if (cat.CheckIn(t.Repo, t.Path, o.Borrower))
             {
                 done++;
-                outLine($"  {p}{Changed(mine, o.Root)}");
+                outLine($"  {t.Repo}/{t.Path}{Changed(mine, t.Root)}");
                 continue;
             }
-            if (mine == null) outLine($"  {p} - already available, nothing to return");
-            else outLine($"  {p} - held by {mine.Borrower}, not you; left alone");
+            if (mine == null) outLine($"  {t.Repo}/{t.Path} - already available, nothing to return");
+            else outLine($"  {t.Repo}/{t.Path} - held by {mine.Borrower}, not you; left alone");
         }
-        outLine($"checked in {done} file(s) in {o.Repo} as {o.Borrower}");
+        outLine($"checked in {done} file(s) as {o.Borrower}");
         return Ok;
     }
 
@@ -102,13 +129,14 @@ public static class CatalogCommands
     /// One file: available, or checked out to whom and until when. The single-file query the
     /// filemgr spec had and this did not.
     /// </summary>
-    public static int RunStatus(string[] args, Func<string, string?> env, Action<string> outLine)
+    public static int RunStatus(string[] args, Func<string, string?> env, Action<string> outLine,
+                                  string cwd, string exeDir)
     {
-        var o = Options.Parse(args, env, outLine);
+        var o = Options.Parse(args, env, outLine, cwd, exeDir);
         if (o == null) return Usage;
         if (o.Paths.Count != 1)
         {
-            outLine("usage: huddle --status [--repo <name>] <repo-relative-path>");
+            outLine("usage: huddle --status [--repo <name>] <path>");
             return Usage;
         }
 
@@ -152,9 +180,10 @@ public static class CatalogCommands
     /// available file, which is the drift the presence-as-state design exists to avoid — see
     /// docs/superpowers/specs/2026-09-12-circulation-design.md.
     /// </summary>
-    public static int RunCatalog(string[] args, Func<string, string?> env, Action<string> outLine)
+    public static int RunCatalog(string[] args, Func<string, string?> env, Action<string> outLine,
+                                   string cwd, string exeDir)
     {
-        var o = Options.Parse(args, env, outLine);
+        var o = Options.Parse(args, env, outLine, cwd, exeDir);
         if (o == null) return Usage;
 
         var cat = new FileCatalog(o.CatalogDir);
@@ -227,7 +256,8 @@ public static class CatalogCommands
         public bool Mine;
         public List<string> Paths = new();
 
-        public static Options? Parse(string[] args, Func<string, string?> env, Action<string> outLine)
+        public static Options? Parse(string[] args, Func<string, string?> env, Action<string> outLine,
+                                     string cwd, string exeDir)
         {
             var o = new Options();
             string? repo = null, borrower = null;
@@ -261,46 +291,52 @@ public static class CatalogCommands
                 }
             }
 
-            // An absolute path would record a checkout nobody else's paths can match.
+            // An absolute path is not portable between agents, and '..' could climb out of the
+            // tree a path names, so both are refused.
             foreach (var p in o.Paths)
             {
                 if (Path.IsPathRooted(p) || p.Contains(".."))
                 {
-                    outLine($"huddle: '{p}' must be a repo-relative path (no drive, no leading slash, no '..').");
+                    outLine($"huddle: '{p}' must be a path relative to where you are running (no drive, no leading slash, no '..').");
                     return null;
                 }
             }
 
-            var found = FindLedgerRoot(env, Directory.GetCurrentDirectory());
+            var found = FindLedgerRoot(env, cwd, exeDir);
             if (found == null)
             {
-                outLine("huddle: could not find an 'ipc/workledger' directory in this checkout or any parent,");
-                outLine("and HUDDLE_CLAIMS is not set. Run this from inside the shared working directory, or");
-                outLine("point HUDDLE_CLAIMS at <huddle-root>/ipc/workledger/claims.");
+                outLine("huddle: could not find the shared ledger (an 'ipc/workledger' directory) above this folder");
+                outLine("or above the huddle binary, and HUDDLE_CLAIMS is not set. Run the huddle.exe from the huddle");
+                outLine("install, or point HUDDLE_CLAIMS at <huddle-root>/ipc/workledger/claims.");
                 return null;
             }
             o.CatalogDir = Path.Combine(found.Value.LedgerDir, "catalog");
             var claimsDir = Path.Combine(found.Value.LedgerDir, "claims");
 
-            // `--repo netlib` means the paths live in netlib' tree, so the root recorded on
-            // the entry must be netlib' root and not the directory we happen to be standing
-            // in. Getting this wrong is not cosmetic: the content hash is read relative to Root,
-            // so a wrong root silently produces no hash and every reader is pointed at the wrong
-            // checkout. Falls back to where we are when the name is unknown or unreadable.
-            o.Root = !string.IsNullOrWhiteSpace(repo)
-                ? LedgerCommands.RootForRepoName(claimsDir, repo!) ?? found.Value.RepoRoot
-                : found.Value.RepoRoot;
-
             var envRepo = env("HUDDLE_REPO");
             o.RepoWasGiven = !string.IsNullOrWhiteSpace(repo) || !string.IsNullOrWhiteSpace(envRepo);
-            o.Repo = !string.IsNullOrWhiteSpace(repo) ? repo!
-                   : !string.IsNullOrWhiteSpace(envRepo) ? envRepo!
-                   // The REGISTERED name for this checkout, not its directory name: this repo
-                   // lives in `myapp` and is registered as `huddle`, so keying on the folder
-                   // would let one physical file be held twice under two spellings (I013).
-                   // Only when no config can be read does the directory name stand in.
-                   : LedgerCommands.RepoNameForRoot(claimsDir, found.Value.RepoRoot)
-                     ?? new DirectoryInfo(found.Value.RepoRoot).Name;
+
+            if (!string.IsNullOrWhiteSpace(repo))
+            {
+                // `--repo netlib`: the paths are relative to netlib' root, and the root recorded
+                // on each entry must be netlib' too. Not cosmetic: the content hash is read relative
+                // to Root, so a wrong root silently yields no hash and points every reader at the
+                // wrong checkout. Falls back to where we are when the name is unknown or unreadable.
+                o.Repo = repo!;
+                o.Root = LedgerCommands.RootForRepoName(claimsDir, repo!) ?? cwd;
+            }
+            else if (!string.IsNullOrWhiteSpace(envRepo))
+            {
+                // A session huddle spawned: it knows its repo and its checkout, and runs from there.
+                o.Repo = envRepo!;
+                var envRoot = env("HUDDLE_REPO_ROOT");
+                o.Root = !string.IsNullOrWhiteSpace(envRoot) ? envRoot!
+                       : LedgerCommands.RootForRepoName(claimsDir, envRepo!) ?? cwd;
+            }
+            else if (!ResolveByPath(o, cwd, claimsDir, found.Value.RepoRoot, outLine))
+            {
+                return null;
+            }
 
             // Deliberately NOT required here: reading the circulation list is anonymous, so an
             // agent can always see what is out before it knows anything about itself. Only the
@@ -309,15 +345,72 @@ public static class CatalogCommands
 
             return o;
         }
+
+        /// <summary>
+        /// No repo named: resolve each path to its repo by FULL path, the way the edit gate does,
+        /// and re-express it relative to that repo's root. All paths must land in one repo — a
+        /// checkout is all-or-nothing within a repo, so a set spanning two is refused rather than
+        /// half-granted. With no paths (a listing, `--checkin --all`), the folder being run from
+        /// names the repo, which only ever labels messages.
+        ///
+        /// Keying by the folder instead is what made an outer checkout invisible: from the outer
+        /// repo's root, a file inside a registered nested project would have been filed under the
+        /// OUTER repo, while the gate files it under the nested one, and the two never meet.
+        /// </summary>
+        private static bool ResolveByPath(Options o, string cwd, string claimsDir, string fallbackRoot,
+                                          Action<string> outLine)
+        {
+            string FallbackName() =>
+                LedgerCommands.RepoNameForRoot(claimsDir, fallbackRoot) ?? new DirectoryInfo(fallbackRoot).Name;
+
+            if (o.Paths.Count == 0)
+            {
+                var here = LedgerCommands.RepoForPath(claimsDir, cwd);
+                o.Repo = here?.Name ?? FallbackName();
+                o.Root = here?.Root ?? fallbackRoot;
+                return true;
+            }
+
+            var resolved = new List<(string Name, string Root, string Rel)>();
+            foreach (var p in o.Paths)
+            {
+                var full = Path.GetFullPath(Path.Combine(cwd, p));
+                var hit = LedgerCommands.RepoForPath(claimsDir, full);
+                if (hit != null)
+                {
+                    resolved.Add((hit.Value.Name, hit.Value.Root,
+                                  Path.GetRelativePath(hit.Value.Root, full).Replace('\\', '/')));
+                    continue;
+                }
+
+                // No readable config, or a file in no registered repo: file it against the tree the
+                // ledger was found in, which is the best that can be done without a registry.
+                var rel = Path.GetRelativePath(fallbackRoot, full).Replace('\\', '/');
+                resolved.Add((FallbackName(), fallbackRoot, rel.StartsWith("..") ? FileCatalog.Normalize(p) : rel));
+            }
+
+            var repos = resolved.Select(r => r.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (repos.Count > 1)
+            {
+                outLine($"huddle: these paths are in different repos ({string.Join(", ", repos)}). A checkout is all");
+                outLine("or nothing within one repo, so give each repo's files a command of their own.");
+                return false;
+            }
+
+            o.Repo = resolved[0].Name;
+            o.Root = resolved[0].Root;
+            o.Paths = resolved.Select(r => r.Rel).ToList();
+            return true;
+        }
     }
 
     /// <summary>
-    /// Find the ledger without being told where it is: HUDDLE_CLAIMS when the environment has
-    /// it, otherwise walk up from the working directory looking for <c>ipc/workledger</c>.
-    /// The walk is what lets an agent that was never configured take part — it only has to be
-    /// running somewhere inside the shared tree.
+    /// Find the ledger without being told where it is: HUDDLE_CLAIMS when the environment has it;
+    /// otherwise walk up from the working directory, then up from the huddle binary's own folder.
+    /// The first walk serves an agent inside the huddle tree. The second serves an agent in any
+    /// other repo, which still runs the one huddle.exe that lives beside the ledger.
     /// </summary>
-    private static (string LedgerDir, string RepoRoot)? FindLedgerRoot(Func<string, string?> env, string cwd)
+    private static (string LedgerDir, string RepoRoot)? FindLedgerRoot(Func<string, string?> env, string cwd, string exeDir)
     {
         var claims = env("HUDDLE_CLAIMS");
         if (!string.IsNullOrWhiteSpace(claims))
@@ -330,16 +423,21 @@ public static class CatalogCommands
             }
         }
 
+        return WalkUpForLedger(cwd) ?? WalkUpForLedger(exeDir);
+    }
+
+    private static (string LedgerDir, string RepoRoot)? WalkUpForLedger(string start)
+    {
+        if (string.IsNullOrWhiteSpace(start)) return null;
         try
         {
-            for (var d = new DirectoryInfo(cwd); d != null; d = d.Parent)
+            for (var d = new DirectoryInfo(start); d != null; d = d.Parent)
             {
                 var candidate = Path.Combine(d.FullName, "ipc", "workledger");
                 if (Directory.Exists(candidate)) return (candidate, d.FullName);
             }
         }
-        catch { /* unreadable parent: fall through to the not-found message */ }
-
+        catch { /* unreadable parent: treat as not found */ }
         return null;
     }
 }
