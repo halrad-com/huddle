@@ -1285,7 +1285,15 @@ public class Orchestrator : IDisposable
 
             // Match claims by the SAME canonical identity HandleClaim stored under, so a
             // release still finds a claim written under the normalized InstanceId form.
-            var owner = ResolveOwner(msg.From)?.InstanceId ?? msg.From;
+            var ownerInstance = ResolveOwner(msg.From);
+            var owner = ownerInstance?.InstanceId ?? msg.From;
+
+            // Release in ONE repo (I018), resolved the way HandleClaim resolves it: the message's
+            // "repo" when given, otherwise the sender's own. Matching on path alone released a
+            // same-named file in every repo. A sender huddle cannot place keeps the old reach.
+            var repoArg = StringProp(body, "repo");
+            var scope = !string.IsNullOrWhiteSpace(repoArg) ? _manager.ResolveRepoName(repoArg)
+                      : string.IsNullOrWhiteSpace(ownerInstance?.RepoName) ? null : ownerInstance!.RepoName;
 
             // Snapshot the session's claimed work-units before releasing so we can
             // tell which claim files fully disappear (= unit done) vs. shrink.
@@ -1294,19 +1302,20 @@ public class Orchestrator : IDisposable
                 .Select(c => c.BatchId)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            var released = _claims.Release(owner, files);
+            var released = _claims.Release(owner, files, repo: scope);
             if (released == 0)
             {
-                _log($"Orchestrator: release from {msg.From} — no matching claim for {string.Join(", ", files)}");
-                SendNack(msg.From, msg.Subject, "no matching claim");
+                _log($"Orchestrator: release from {msg.From} — no matching claim for {string.Join(", ", files)}{(scope == null ? "" : $" in {scope}")}");
+                SendNack(msg.From, msg.Subject, scope == null ? "no matching claim" : $"no matching claim in {scope}");
             }
             else
             {
-                _log($"Orchestrator: release from {msg.From} — {released} file(s)");
+                _log($"Orchestrator: release from {msg.From} — {released} file(s){(scope == null ? "" : $" in {scope}")}");
 
-                // Return the books too. Repo-agnostic to match Release itself, which matches on
-                // session plus path and never takes a repo.
-                var back = files.Sum(f => _catalog.CheckInAnywhere(f, owner));
+                // Return the books too, in the same repo the release was scoped to.
+                var back = scope == null
+                    ? files.Sum(f => _catalog.CheckInAnywhere(f, owner))
+                    : files.Count(f => _catalog.CheckIn(scope, f, owner));
                 if (back > 0) _log($"Orchestrator: checked in {back} file(s) in the catalog for {owner}");
 
                 // A unit whose claim file is now gone (all its files released) is done.
@@ -1602,7 +1611,7 @@ public class Orchestrator : IDisposable
             }
             else
             {
-                _claims.Release(sessionId, u.Files);
+                _claims.Release(sessionId, u.Files, repo: u.Repo);
                 foreach (var f in u.Files) _catalog.CheckIn(u.Repo, f, sessionId);
                 _queue.MarkFailed(u.Id);
                 _log($"queue: {u.Id} failed to start — released its claim");

@@ -362,8 +362,14 @@ public class WorkLedgerClaims
     /// <summary>
     /// Remove specified files from a session's claim(s). If a claim has no files remaining, delete it.
     /// Returns how many files were released (across possibly multiple claim files).
+    ///
+    /// <paramref name="repo"/> scopes the release to ONE repo (I018). Claim paths are repo-relative,
+    /// so one path names a different file in every repo, and matching on session plus path alone
+    /// released all of them: releasing `AGENTS.md` in one repo silently dropped the claim on another
+    /// repo's `AGENTS.md` before it was committed. Null keeps the old reach, for callers that
+    /// genuinely hold no repo.
     /// </summary>
-    public int Release(string sessionId, IEnumerable<string> files, string? ownerGuid = null)
+    public int Release(string sessionId, IEnumerable<string> files, string? ownerGuid = null, string? repo = null)
     {
         lock (_lock)
         {
@@ -371,6 +377,21 @@ public class WorkLedgerClaims
             // exactly the state direct claim access exists to survive. Releasing before anything
             // was ever claimed releases nothing — a no-op, not an exception. (Same guard as ReadAll.)
             if (!Directory.Exists(_claimsDir)) return 0;
+
+            // In scope when the names agree, or the claim recorded no repo (the same fail-safe
+            // collision uses, so a legacy claim never becomes impossible to release), or both names
+            // resolve to one registered root (an alias spelling). Deliberately NOT the claim's
+            // recorded checkout root: a worktree session's claim carries its worktree as Root, and
+            // it must still release under its repo name.
+            var wantRoot = string.IsNullOrWhiteSpace(repo) ? null : TryResolveRoot(repo!, _resolveRoot);
+            bool InScope(WorkLedgerClaim c)
+            {
+                if (string.IsNullOrWhiteSpace(repo)) return true;
+                if (ReposCollide(c.Repo, repo!)) return true;
+                var haveRoot = TryResolveRoot(c.Repo, _resolveRoot);
+                return haveRoot != null && wantRoot != null &&
+                       haveRoot.TrimEnd('\\', '/').Equals(wantRoot.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+            }
 
             // Path-normalized (same rule as conflict matching) so a claim written with
             // one separator style can be released with the other.
@@ -386,6 +407,7 @@ public class WorkLedgerClaims
                 // the other's protection while reporting success.
                 if (!string.IsNullOrEmpty(ownerGuid) && !string.IsNullOrEmpty(claim.OwnerGuid) &&
                     !claim.OwnerGuid.Equals(ownerGuid, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!InScope(claim)) continue;
 
                 var remaining = claim.Files.Where(f => !toRelease.Contains(NormPath(f))).ToList();
                 var matched = claim.Files.Count - remaining.Count;

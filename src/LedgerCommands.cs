@@ -400,24 +400,36 @@ public static class LedgerCommands
 
     private static int ReleaseCore(string[] rest, Func<string, string?> env, Action<string> outLine)
     {
-        rest = SplitRepoFlag(rest, out _); // release matches on session + path; the flag is accepted for symmetry
+        rest = SplitRepoFlag(rest, out var repoOverride);
         if (rest.Length == 0)
         {
             outLine("usage: huddle --release [--repo <name>] <repo-relative-path> [more paths...]");
             return Usage;
         }
         if (!AllRelative(rest, "release", outLine)) return Usage;
-        if (!TryContext(env, outLine, out var claimsDir, out var instance, out _, out var guid))
+        if (!TryContext(env, outLine, out var claimsDir, out var instance, out var ownRepo, out var guid))
             return Usage;
 
-        // The guid keeps a session from releasing a same-named twin's claim (I016).
-        var released = LedgerCli.Release(new WorkLedgerClaims(claimsDir, outLine), instance, rest, guid);
+        // Release in ONE repo, the same one `--claim` would have used (I018): the named repo, or
+        // this session's own. The flag used to be parsed and thrown away, and release matched on
+        // path alone, so releasing AGENTS.md in one repo dropped this session's claim on every
+        // other repo's AGENTS.md too. A session with no repo recorded keeps the old reach.
+        var repo = !string.IsNullOrWhiteSpace(repoOverride) ? repoOverride : ownRepo;
+        var scope = string.IsNullOrWhiteSpace(repo) ? null : repo;
+
+        // The guid keeps a session from releasing a same-named twin's claim (I016). The resolver
+        // lets an alias spelling release a claim recorded under the canonical name.
+        var claims = new WorkLedgerClaims(claimsDir, outLine, BuildRepoResolver(claimsDir));
+        var released = LedgerCli.Release(claims, instance, rest, guid, scope);
         outLine($"released {released} file(s)");
 
         // Return the books as well, or the lease would hold files nobody is working on until it
-        // lapsed. Only our own checkouts move: CheckIn refuses somebody else's.
+        // lapsed — in the same repo the release was scoped to. Only our own checkouts move:
+        // CheckIn refuses somebody else's.
         var catalog = new FileCatalog(FileCatalog.DirBesideClaims(claimsDir));
-        var back = rest.Sum(f => catalog.CheckInAnywhere(f, instance));
+        var back = scope == null
+            ? rest.Sum(f => catalog.CheckInAnywhere(f, instance))
+            : rest.Count(f => catalog.CheckIn(scope, f, instance));
         if (back > 0) outLine($"checked in {back} file(s) in the catalog");
         return Ok;
     }
