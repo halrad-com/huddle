@@ -69,6 +69,48 @@ public static class LedgerCommands
     }
 
     /// <summary>
+    /// Absolute root of a registered repo name or alias, or null when no config can be read and
+    /// for an unknown name. A cross-repo checkout needs this: the paths belong to the NAMED
+    /// repo's tree, so recording the current directory's root instead would point every reader
+    /// — and the content hash — at the wrong checkout.
+    /// </summary>
+    public static string? RootForRepoName(string claimsDir, string repoName) =>
+        BuildRepoResolver(claimsDir)?.Invoke(repoName);
+
+    /// <summary>
+    /// The inverse of the resolver: the REGISTERED repo name for an absolute checkout root, or
+    /// null when no config can be read or no session lives there.
+    ///
+    /// The circulation desk needs this because a checkout's directory name and its registered
+    /// repo name are routinely different — this repo sits in `myapp` and is registered as
+    /// `huddle`. Keying a catalog entry on the directory name would let the same physical file
+    /// be held twice under two spellings, which is ISSUES.md I013 reached by a new route.
+    /// First match wins so the answer is stable; alias spellings resolve to the same root and
+    /// therefore the same name.
+    /// </summary>
+    public static string? RepoNameForRoot(string claimsDir, string root)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(root)) return null;
+            var configPath = FindConfig(claimsDir);
+            if (configPath == null) return null;
+            var want = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            foreach (var s in HuddleConfig.Load(configPath).Sessions)
+            {
+                if (string.IsNullOrWhiteSpace(s.Name) || string.IsNullOrWhiteSpace(s.Root)) continue;
+                var have = Path.GetFullPath(s.Root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (have.Equals(want, StringComparison.OrdinalIgnoreCase)) return s.Name;
+            }
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// huddle.json (or the legacy myapp.json Program.cs still accepts) beside the ipc
     /// directory that holds this claims dir, or null if there is nothing there to read.
     /// A HUDDLE_CLAIMS pointed somewhere else entirely simply finds no config and degrades.
@@ -270,6 +312,24 @@ public static class LedgerCommands
         var result = LedgerCli.Claim(claims, claim);
         outLine($"claimed {rest.Length} file(s) in {repo} as {instance}");
 
+        // A claim is the WORK record and always lands — dispatch-batch and every persona
+        // depend on that. Exclusion is the catalog's job, so take the books too: this is what
+        // makes a huddle session visible to a borrower huddle never spawned, and vice versa.
+        // A refusal is reported rather than fatal, because the edit itself is now gated by
+        // --claim-check reading the same catalog; the agent learns here, and is stopped there.
+        var catalog = new FileCatalog(FileCatalog.DirBesideClaims(claimsDir));
+        foreach (var f in rest)
+        {
+            var outcome = catalog.TryCheckOut(repo, f, instance, out var holder, root: claimRoot);
+            if (outcome is CheckoutOutcome.CheckedOut or CheckoutOutcome.Renewed) continue;
+            if (holder != null && outcome == CheckoutOutcome.HeldByOther)
+                outLine($"CHECKED OUT to {holder.Borrower} until {holder.DueAt:yyyy-MM-dd HH:mm}Z: {f}" +
+                        $" -> you may NOT edit this file. It is held in the catalog, which records agents" +
+                        $" huddle did not start as well as those it did.");
+            else
+                outLine($"WARNING: could not check out {f} in the catalog - exclusion is degraded for it.");
+        }
+
         foreach (var overlap in result.Overlaps)
         {
             // The claim time is shown because the holder may be a session that has since
@@ -316,6 +376,12 @@ public static class LedgerCommands
         // The guid keeps a session from releasing a same-named twin's claim (I016).
         var released = LedgerCli.Release(new WorkLedgerClaims(claimsDir, outLine), instance, rest, guid);
         outLine($"released {released} file(s)");
+
+        // Return the books as well, or the lease would hold files nobody is working on until it
+        // lapsed. Only our own checkouts move: CheckIn refuses somebody else's.
+        var catalog = new FileCatalog(FileCatalog.DirBesideClaims(claimsDir));
+        var back = rest.Sum(f => catalog.CheckInAnywhere(f, instance));
+        if (back > 0) outLine($"checked in {back} file(s) in the catalog");
         return Ok;
     }
 
@@ -413,6 +479,54 @@ public static class LedgerCommands
         var claims = new WorkLedgerClaims(claimsDir, _ => { }, resolver, GitWorktrees.Identify).ReadAll();
         static string Norm(string p) => p.Replace('\\', '/').TrimStart('.', '/').ToLowerInvariant();
 
+        // The catalog is consulted FIRST and is authoritative, because it is the only record a
+        // borrower huddle never spawned can write (see FileCatalog). Two consequences:
+        //
+        //   * somebody else's live checkout blocks this edit even when no claim exists — the
+        //     protection the roster-based path could not give, since IsOrphan read a foreign
+        //     claim as dead and ReapOrphans archived it, handing the next agent a false
+        //     all-clear on a file somebody was editing;
+        //   * a checkout of MY OWN makes the edit legal without a claim, so `huddle --checkout`
+        //     is a first-class way in and no agent has to learn two mechanisms.
+        //
+        // An expired lease is not a holder: the borrower stopped renewing, so the book is back
+        // on the shelf and the next agent may take it.
+        var catalog = new FileCatalog(FileCatalog.DirBesideClaims(claimsDir));
+
+        // Every allowed edit is a HEARTBEAT. Renew when the caller already holds the file, and
+        // take it when the caller is entitled to it but had not checked it out — the gate has
+        // just decided this edit is legal, so recording it can only tell other agents more than
+        // silence does.
+        //
+        // Without this a lease is a trap rather than a safeguard: check out five files for an
+        // hour, work for ninety minutes, and at minute sixty-one another agent may legitimately
+        // take the file you are still editing. Renewing on edit makes the lease track what an
+        // agent is DOING instead of what it once intended, and an agent that stops working
+        // stops renewing, which is the whole point of a lease. Failure is ignored: a book is
+        // still readable when the stamp will not print, and this must never block an edit.
+        void Heartbeat()
+        {
+            try { catalog.TryCheckOut(repoName!, rel, instance, out _, root: repoRoot); }
+            catch { /* exclusion degraded, edit already judged legal */ }
+        }
+
+        var entry = catalog.Status(repoName!, rel);
+        if (entry != null && !entry.IsOverdue(DateTime.UtcNow))
+        {
+            if (entry.Borrower.Replace(':', '_')
+                     .Equals(instance.Replace(':', '_'), StringComparison.OrdinalIgnoreCase))
+            {
+                Heartbeat();
+                return 0;
+            }
+
+            stderr($"EDIT BLOCKED by huddle: {repoName}:{rel} is CHECKED OUT to {entry.Borrower} " +
+                   $"until {entry.DueAt:yyyy-MM-dd HH:mm}Z.");
+            stderr("  That borrower may be an agent huddle did not start, so do not assume it is stale.");
+            stderr("  Work on other files, or wait for the due date to lapse. `huddle --catalog` lists everything out.");
+            return Block;
+        }
+
         // "Mine" is this INSTANCE, not merely this name. Two sessions can share one
         // `repo:persona` (I016), and on SessionId alone each would read the other's claim
         // as its own and be waved through — the guard would certify exactly the collision
@@ -435,7 +549,10 @@ public static class LedgerCommands
             // recorded Root resolving to the same physical file).
             var sameRepo = c.Repo.Equals(repoName, StringComparison.OrdinalIgnoreCase) ||
                            (!string.IsNullOrEmpty(c.Root) && Path.GetFullPath(c.Root).TrimEnd('\\', '/').Equals(repoRoot, StringComparison.OrdinalIgnoreCase));
-            if (sameRepo && c.Files.Any(f => Norm(f) == Norm(rel))) return 0;
+            // Entitled by a claim but not yet holding the book: take it now, so a batch
+            // dispatched through the claim path becomes visible to a borrower reading the
+            // catalog instead of looking like an empty library.
+            if (sameRepo && c.Files.Any(f => Norm(f) == Norm(rel))) { Heartbeat(); return 0; }
         }
 
         var holders = claims

@@ -55,6 +55,7 @@ public static class Verbs
         new("projects",  "projects [html [path]]   List projects; 'html' writes the status page", "insight"),
         new("project",   "project <slug>           Show a project's detail", "insight"),
         new("conflicts", "conflicts                Show claim conflicts", "work"),
+        new("catalog",   "catalog [<repo>] [--overdue]   What is checked out, to whom, until when", "work"),
         new("census",    "census [repo]            Wiring census: settings nothing reads", "work"),
         new("ledger",    "ledger [all|<id>|open [--by-age]|orphans|accept <id>|drop <id> <why>|decline <id> [note]] [--repo <name>] [--owner <instance>]   The feature ledger", "work"),
         new("queue",     "queue                    Show the work queue", "work"),

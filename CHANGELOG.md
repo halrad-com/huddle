@@ -13,6 +13,60 @@ is the source of truth, the handle is just for reading.
 day: start a new day block at the top of the file. Never rewrite a shipped entry.
 History from before this file lives in the git commit log.
 
+## 2026-09-12
+
+### 2026-09-12.1 - Cross-agent collaboration: agents huddle did not start can share the working tree - (commit below)
+
+**New feature.** Agents from other tools, such as a Codex session or a Claude Code session started
+by hand, can now work in the same checkout as huddle's fleet without silently overwriting each
+other. Until now, coordination only reached sessions huddle had spawned itself. Everyone else was
+invisible, and huddle actively discarded their claims as dead.
+
+**The model is a library.** A file is either *available* or *checked out*. Any agent takes the
+files it is about to edit and returns them when it has committed:
+
+- `huddle --catalog` shows what is out, to whom, and until when. Anyone can read it, with no
+  identity and no setup.
+- `huddle --checkout --as <name> <paths>` takes files. It works as all-or-nothing for a set, and
+  refuses by name when someone else holds one.
+- `huddle --checkin --as <name> --all` returns them. `huddle --status <path>` answers for one file.
+
+The commands need no environment. They find the shared ledger by looking upward from wherever
+they run, so an agent nobody configured can take part.
+
+**How it holds together:**
+
+- **Checkouts expire.** The default is an hour, so a crashed agent never locks a file forever.
+  Every edit a huddle session makes renews its own checkout automatically, so work in progress
+  does not lapse.
+- **Enforced for huddle's own sessions.** The edit gate now reads the catalog first. Someone
+  else's checkout blocks the edit even without a claim, and your own checkout permits it.
+- **One record across every route.** `--claim`, the mail `claim` and `release` commands, and
+  dispatched batches all take and return books. The fleet's work is visible to an outside agent,
+  and the outside agent's work is visible to the fleet.
+- **Taught where outside agents look.** `AGENTS.md` at the repo root now covers checkout, and
+  nothing else. It is the file Codex and other tools read on their own.
+- **Visible to the operator.** A new console verb, `catalog [<repo>] [--overdue]`, lists what is
+  out and who is late, with per-borrower totals. The console and the command line share one
+  renderer.
+- **Checks what changed.** Each checkout records a content hash, so check-in and `--status`
+  report *changed*, *unchanged since checkout*, or *gone from the working tree*.
+
+**Seen working on 2026-09-12.** A Codex desktop session checked files out through the catalog
+while doing real work in a repo huddle's fleet was editing at the same time, and checked them back
+in when it finished. A huddle session checked out nine files as it edited, then returned all nine
+on release.
+
+**Known limits:**
+
+- Outside agents *cooperate*. They have no gate. Only huddle-spawned Claude sessions are
+  stopped at the edit, so an outside agent that ignores the catalog is caught only after the
+  fact.
+- The catalog teaches agents that read the `AGENTS.md` of the repo they are working in. A repo
+  without that section does not teach checkout, so copy it into any repo outside agents will edit.
+- The existing claim ledger stays in place as the work record: batch, project, base commit. The
+  catalog is the lock.
+
 ## 2026-09-10
 
 ### 2026-09-10.1 - scratchpad injection is bounded - (commit below)

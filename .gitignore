@@ -21,8 +21,11 @@ ipc/*/failed/
 ipc/processed/
 ipc/_huddle/
 ipc/workledger/claims/
+ipc/workledger/catalog/
 ipc/workledger/*.md
 ipc/workledger/*.jsonl
+# ...except the standing explainer an agent finds by stumbling into the directory.
+!ipc/workledger/README.md
 
 # Claude Code runtime state
 .claude/scheduled_tasks.lock

@@ -15,6 +15,7 @@ public class Orchestrator : IDisposable
     private FileSystemWatcher? _watcher;
     private readonly WorkLedgerClaims _claims;
     private readonly ClaimJournal _journal;
+    private readonly FileCatalog _catalog;
     // git TOP -> last HEAD this process audited (keyed by repository, not by
     // registered name, so nested registrations audit once). In-memory on purpose: a restart
     // re-seeds from current HEAD, so huddle never replays old commits as findings.
@@ -80,6 +81,11 @@ public class Orchestrator : IDisposable
         // report narrows and nothing else changes.
         _claims = new WorkLedgerClaims(ipc.ClaimsDir, log, ResolveRepoRoot, GitWorktrees.Identify);
         _journal = new ClaimJournal(ipc.WorkLedgerDir, log);
+        // The circulation catalog lives beside the claims drawer. The orchestrator keeps the two
+        // in step so that a session which claims or releases BY MAIL behaves the same as one
+        // using `huddle --claim` / `--release`; without this, the two documented routes would
+        // disagree about whether a book had been taken out or returned.
+        _catalog = new FileCatalog(Path.Combine(ipc.WorkLedgerDir, "catalog"));
         _queue = new WorkQueue(ipc.QueueDir, log);
         _queue.Load();
         _resLedger = new ResourceLedger(ipc.ResLedgerDir, log);
@@ -1201,10 +1207,27 @@ public class Orchestrator : IDisposable
             // (dispatch-batch still uses TryClaim — that is a planner pre-flight check
             // made before any work starts, not a runtime lock.)
             var result = LedgerCli.Claim(_claims, claim);
+
+            // Take the books as well, exactly as `huddle --claim` does. A refusal is reported in
+            // the ack rather than refusing the claim: the claim is the work record and must
+            // land (see above), while exclusion is the catalog's job and the edit itself is
+            // gated by --claim-check reading the same catalog.
+            var heldElsewhere = new List<string>();
+            foreach (var f in files)
+            {
+                var outcome = _catalog.TryCheckOut(resolvedRepo, f, msg.From, out var holder,
+                                                   root: claim.Root);
+                if (outcome == CheckoutOutcome.HeldByOther && holder != null)
+                    heldElsewhere.Add($"{f} (to {holder.Borrower} until {holder.DueAt:yyyy-MM-dd HH:mm}Z)");
+            }
+            var checkoutNote = heldElsewhere.Count == 0
+                ? ""
+                : $" — CHECKED OUT to someone else, do NOT edit: {string.Join("; ", heldElsewhere)}";
+
             // Merge risks are appended to whichever ack goes out, never substituted for a
             // conflict report: they are non-blocking by construction (different files on
             // disk) and must not dilute the "stop and talk" of a real overlap.
-            var mergeNote = MergeRiskNote(result.MergeWarnings);
+            var mergeNote = MergeRiskNote(result.MergeWarnings) + checkoutNote;
             if (result.Overlaps.Count == 0)
             {
                 _log($"Orchestrator: claim recorded — {msg.From} holds {files.Count} file(s) in {resolvedRepo} ({claimId}){(mergeNote.Length > 0 ? " [merge risk]" : "")}");
@@ -1280,6 +1303,11 @@ public class Orchestrator : IDisposable
             else
             {
                 _log($"Orchestrator: release from {msg.From} — {released} file(s)");
+
+                // Return the books too. Repo-agnostic to match Release itself, which matches on
+                // session plus path and never takes a repo.
+                var back = files.Sum(f => _catalog.CheckInAnywhere(f, owner));
+                if (back > 0) _log($"Orchestrator: checked in {back} file(s) in the catalog for {owner}");
 
                 // A unit whose claim file is now gone (all its files released) is done.
                 var afterUnits = _claims.ReadAll()
@@ -1550,6 +1578,16 @@ public class Orchestrator : IDisposable
                 continue;
             }
 
+            // The unit's files are now this session's, so take the books before it starts. A
+            // dispatched batch that lived only in claims was invisible to anyone reading the
+            // catalog — a borrower huddle never started would see an empty library while six
+            // agents edited. The claim above already refused on conflict, so these should all
+            // succeed; a refusal is logged rather than aborting the dispatch, because the edit
+            // is gated by --claim-check reading this same catalog.
+            foreach (var f in u.Files)
+                if (_catalog.TryCheckOut(u.Repo, f, sessionId, out var h, root: root) == CheckoutOutcome.HeldByOther)
+                    _log($"queue: {u.Id} — {f} is checked out to {h?.Borrower} until {h?.DueAt:yyyy-MM-dd HH:mm}Z");
+
             var ok = _manager.Start(u.Repo, u.Persona, prompt: WithShellRules(u.Prompt), project: u.Project);
             if (ok)
             {
@@ -1565,6 +1603,7 @@ public class Orchestrator : IDisposable
             else
             {
                 _claims.Release(sessionId, u.Files);
+                foreach (var f in u.Files) _catalog.CheckIn(u.Repo, f, sessionId);
                 _queue.MarkFailed(u.Id);
                 _log($"queue: {u.Id} failed to start — released its claim");
                 // Opened above only if the session actually started, so there is usually

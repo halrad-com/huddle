@@ -95,6 +95,21 @@ class Program
         if (args.Length >= 1 && args[0] == "--ledger")
             return LedgerCommands.RunLedger(args[1..], Environment.GetEnvironmentVariable, Console.WriteLine);
 
+        // The circulation desk (see CatalogCommands). Unlike --claim, these need no
+        // environment: they find ipc/workledger by walking up from the working directory and
+        // take identity from --as, so an agent huddle never spawned can take part.
+        if (args.Length >= 1 && args[0] == "--checkout")
+            return CatalogCommands.RunCheckout(args[1..], Environment.GetEnvironmentVariable, Console.WriteLine);
+
+        if (args.Length >= 1 && args[0] == "--checkin")
+            return CatalogCommands.RunCheckin(args[1..], Environment.GetEnvironmentVariable, Console.WriteLine);
+
+        if (args.Length >= 1 && args[0] == "--catalog")
+            return CatalogCommands.RunCatalog(args[1..], Environment.GetEnvironmentVariable, Console.WriteLine);
+
+        if (args.Length >= 1 && args[0] == "--status")
+            return CatalogCommands.RunStatus(args[1..], Environment.GetEnvironmentVariable, Console.WriteLine);
+
         // PreToolUse guard (see LedgerCommands.RunClaimCheck). Claude Code hands the tool
         // call as JSON on stdin; exit 2 blocks the tool and stderr goes back to the model.
         if (args.Length >= 1 && args[0] == "--claim-check")

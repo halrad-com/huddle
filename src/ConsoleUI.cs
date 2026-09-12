@@ -492,6 +492,10 @@ public class ConsoleUI
                 HandleConflicts();
                 break;
 
+            case "catalog":
+                HandleCatalog(arg);
+                break;
+
             case "census":
                 HandleCensus(arg);
                 break;
@@ -3023,6 +3027,80 @@ public class ConsoleUI
     {
         var root = string.IsNullOrWhiteSpace(c.Root) ? c.Repo : c.Root;
         return string.IsNullOrWhiteSpace(c.Branch) ? root : $"{root} ({c.Branch})";
+    }
+
+    /// <summary>
+    /// `catalog [&lt;repo&gt;] [--overdue]` — the circulation desk from the operator's side: what is
+    /// checked out, to whom, until when, and who is late. Rendered by <see cref="CatalogView"/>,
+    /// the same renderer `huddle --catalog` uses, so the console and the command line cannot
+    /// disagree about what is out.
+    ///
+    /// Unlike `conflicts`, this reaps nothing and consults no roster. Liveness in the catalog is
+    /// the due date, so an overdue entry is SHOWN as overdue rather than quietly removed — the
+    /// operator deserves to see that a book is out and late, not just that it is gone.
+    /// </summary>
+    private void HandleCatalog(string arg)
+    {
+        if (Ipc == null)
+        {
+            Log("IPC is disabled. Enable 'ipc' in huddle.json.");
+            return;
+        }
+
+        try
+        {
+            var tokens = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var overdueOnly = tokens.Any(t => t.Equals("--overdue", StringComparison.OrdinalIgnoreCase));
+            var unknown = tokens.FirstOrDefault(t =>
+                t.StartsWith("--") && !t.Equals("--overdue", StringComparison.OrdinalIgnoreCase));
+            if (unknown != null)
+            {
+                Log($"catalog: unknown option '{unknown}'. Usage: catalog [<repo>] [--overdue]");
+                return;
+            }
+
+            // A misspelled repo would otherwise print "nothing is checked out" — a false
+            // all-clear, the one answer this view must never give by accident.
+            var repo = tokens.FirstOrDefault(t => !t.StartsWith("--"));
+            if (repo != null && !_manager.Repos.Keys.Any(k => k.Equals(repo, StringComparison.OrdinalIgnoreCase)))
+            {
+                Log($"catalog: '{repo}' is not a registered repo. `repos` lists them.");
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+            var all = new FileCatalog(Path.Combine(Ipc.WorkLedgerDir, "catalog")).ReadAll();
+            var shown = CatalogView.Filter(all, now, repo, overdueOnly);
+
+            Console.WriteLine();
+            if (shown.Count == 0)
+            {
+                // "No checkout is overdue" must not claim every file is available: files can be
+                // out and on time.
+                Log(overdueOnly
+                    ? $"No checkout is overdue{(repo != null ? $" in {repo}" : "")}."
+                    : $"Nothing is checked out{(repo != null ? $" in {repo}" : "")} - every file is available.");
+                return;
+            }
+
+            try
+            {
+                foreach (var e in shown)
+                {
+                    Console.ForegroundColor = e.IsOverdue(now) ? ConsoleColor.Yellow : ConsoleColor.Cyan;
+                    Console.WriteLine(CatalogView.Line(e, now));
+                }
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                foreach (var line in CatalogView.SummaryLines(CatalogView.Summarize(shown, now)))
+                    Console.WriteLine(line);
+            }
+            finally { Console.ResetColor(); }
+        }
+        catch (Exception ex)
+        {
+            // The verb never throws at the operator, matching `conflicts`.
+            Log($"catalog: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private void HandleConflicts()

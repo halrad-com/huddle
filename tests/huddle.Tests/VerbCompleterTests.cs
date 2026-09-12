@@ -51,8 +51,8 @@ public class VerbCompleterTests
         // ?, h, msg, unread, goto, rebuild, handoff, version) are excluded.
         // Adding a verb to that switch means adding it here and bumping this
         // count; this assertion is what makes forgetting the catalog a failure.
-        Assert.Equal(42, Verbs.Catalog.Count);
-        Assert.Equal(42, Verbs.Catalog.Select(v => v.Name).Distinct().Count());
+        Assert.Equal(43, Verbs.Catalog.Count);
+        Assert.Equal(43, Verbs.Catalog.Select(v => v.Name).Distinct().Count());
     }
 
     [Fact]
@@ -74,5 +74,17 @@ public class VerbCompleterTests
         Assert.Contains("--who", hint);
         Assert.Contains("--since", hint);
         Assert.Contains("html", hint);
+    }
+
+    [Fact]
+    public void Catalog_is_in_the_catalog_with_argument_grammar()
+    {
+        // Same rule as stats: typing "catalog " must show what it takes, or the circulation
+        // view reads as unfinished. The hint is derived from the usage string, so this also
+        // pins that the grammar stays single-spaced and parseable.
+        Assert.Contains("catalog", Verbs.Catalog.Select(v => v.Name));
+        var hint = new ArgCompleter(new ArgProviders()).Hint("catalog ");
+        Assert.Contains("<repo>", hint);
+        Assert.Contains("--overdue", hint);
     }
 }
